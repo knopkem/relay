@@ -1,0 +1,13 @@
+# OS / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# local OpenCode state (don't commit secrets or session data)
+.opencode/
+opencode.local.json
+
+# local model selection and its rendered agents
+models.local.json
+agent.local/
