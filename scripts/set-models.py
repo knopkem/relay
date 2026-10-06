@@ -6,13 +6,15 @@ The repository stores placeholders (`__ORCHESTRATOR_MODEL__`,
 `# __IMPLEMENTER_OPTIONS__`); your selection is saved to gitignored
 `models.local.json` and rendered into gitignored `agent.local/`, which is
 symlinked into `~/.config/opencode/agent` (replacing any existing agent-dir
-symlink). Unset roles default: verifier -> planner, orchestrator -> planner.
+symlink). Unset roles default: verifier -> planner, orchestrator -> planner,
+watcher -> verifier.
 
 Roles:
     orchestrator -> orchestrator.md
     planner      -> planner.md
     verifier     -> verifier.md
     implementer  -> implementer.md
+    watcher      -> watcher.md
 
 Usage:
     scripts/set-models.py                      interactive picker (all roles)
@@ -41,16 +43,17 @@ SELECTION = ROOT / "models.local.json"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "opencode"
 LINK = CONFIG_DIR / "agent"
 
-ROLES = ["orchestrator", "planner", "verifier", "implementer"]
+ROLES = ["orchestrator", "planner", "verifier", "implementer", "watcher"]
 ROLE_FILES = {
     "orchestrator": "orchestrator.md",
     "planner": "planner.md",
     "verifier": "verifier.md",
     "implementer": "implementer.md",
+    "watcher": "watcher.md",
 }
 ROLE_TOKENS = {role: f"__{role.upper()}_MODEL__" for role in ROLES}
 ROLE_FLAGS = {f"--{role}": role for role in ROLES}
-ROLE_DEFAULTS = {"orchestrator": "planner", "verifier": "planner"}
+ROLE_DEFAULTS = {"orchestrator": "planner", "verifier": "planner", "watcher": "verifier"}
 MODEL_TOKEN = re.compile(r"__[A-Z]+_MODEL__")
 OPTIONS_MARKER = "# __IMPLEMENTER_OPTIONS__"
 IMPLEMENTER_OPTIONS = (
@@ -248,12 +251,14 @@ def main():
         print_models(models)
         planner = prompt_choice("planner", models)
         implementer = prompt_choice("implementer", models)
+        verifier = prompt_choice("verifier", models, default=planner)
         selection.update(
             {
                 "planner": planner,
                 "implementer": implementer,
                 "orchestrator": prompt_choice("orchestrator", models, default=planner),
-                "verifier": prompt_choice("verifier", models, default=planner),
+                "verifier": verifier,
+                "watcher": prompt_choice("watcher", models, default=verifier),
             }
         )
     else:

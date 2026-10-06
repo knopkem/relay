@@ -1,54 +1,62 @@
-# V2 sketch — parallel good-model supervision
+# Parallel supervision (v2)
 
-V1 runs one implementer to completion and only verifies afterwards; its
-durable state already lives in `PLAN.md`, `HANDOFF.md` and `ISSUES.md`, and
-every role reports a single protocol line. The waste this design targets: the
-good model sits idle while the fast implementer explores dead ends. V2 keeps
-both models busy by letting them talk mid-task, reusing those artifacts as the
-watcher's read surface.
+V1 runs one fast implementer through the whole plan and verifies afterwards.
+V2 keeps the good model busy *while* the implementer works: the `supervise`
+plugin and the read-only `watcher` agent give direction mid-task so dead ends
+end early instead of becoming fix rounds.
 
-## Why it can work
+## Why it works
 
-While a tool call executes, the implementer's LLM request has already
-finished, so the model provider is free — even when both roles use the same
-model. A tool result is therefore a safe, synchronous channel back to a good
-model.
+While a tool call executes, the implementer's LLM request has finished, so the
+model provider is free — even when both roles share a model. A plugin tool
+call is therefore a safe, synchronous channel back to a good model. Both facts
+were verified on opencode 1.18.34 (nested `session.prompt` from a tool
+`execute` returns text without deadlock; `experimental.chat.messages.transform`
+mutations reach the model; plugin tools use their bare name and receive
+`context.agent`).
 
-## Components
+## The three channels
 
-1. `plugins/supervise.js`
-   - tracks the implementer's child session from the task part metadata
-     (`sessionID`) and keeps a small flight recorder of recent tool calls,
-     failures and edited files; reads `PLAN.md`/`HANDOFF.md`/`ISSUES.md` for
-     state instead of replaying transcripts where possible;
-   - exposes a custom tool `ask_supervisor(question, context?)` to the
-     implementer only. `execute` starts a watcher session on the good model
-     with PLAN.md plus the flight recorder, asks for at most two sentences of
-     direction, and returns the answer as the tool result. The implementer
-     blocks only while genuinely stuck;
-   - optionally queues advisory notes into the implementer session
-     (`client.session.prompt`) when hard drift signals appear: repeated
-     identical failures, a long edit run with no green command, edits outside
-     the plan's file list. Advisory only, rate-limited, never more than one per
-     N steps.
-2. `watcher` agent (good model, read-only): answers with direction only —
-   never code, never plan rewrites; if the plan itself is wrong it says
-   "report a blocker" instead.
+1. **Pull — `ask_supervisor(question)`.** The implementer calls it when stuck:
+   after the same failure twice, before deviating from the plan, or after ~20
+   steps without progress. The plugin runs the watcher in a child session and
+   returns at most two sentences. The implementer blocks only while genuinely
+   uncertain.
+2. **Canned advisories.** Deterministic nudges, no model call: 15+ edits with
+   no build, 40 read/search steps with no edit, the same command failing
+   twice. The note is injected into the implementer's next model step as a
+   synthetic text part via `experimental.chat.messages.transform`.
+3. **Async prereview.** Every 25 tool calls the plugin asks the watcher in the
+   background (non-blocking) to review recent actions against the plan. The
+   answer is injected when ready; notes older than two minutes are dropped, and
+   a plain `continue` is discarded.
 
-## Why pull beats push
+The watcher session persists for the implementer session, so PLAN.md is
+prefilled once. In advisory-only mode (`OCODESA_SUPERVISE=advisory`) the pull
+tool and prereview are disabled and only canned advisories run.
 
-A watcher guessing from events needs trigger heuristics and can deliver stale
-advice mid-step. The implementer asking at the exact moment of uncertainty
-needs no heuristics, the answer is never stale, and the cost is proportional
-to real uncertainty. Passive drift notes stay a safety net, not the main
-channel.
+## Configuration
 
-## Open questions for V2
+- `OCODESA_SUPERVISE=off|advisory|full` — default `full`. `off` makes the
+  plugin inert.
+- `OCODESA_SUPERVISE_DEBUG=1` — append JSONL events to
+  `.ocodesa/supervise.jsonl` in the target project (asks, injections, errors).
+- Budgets (constants at the top of `plugins/supervise.js`): 10 asks per run,
+  one ask per minute; 3 canned advisories, five minutes apart; 4 prereviews,
+  five minutes apart.
 
-- One persistent watcher session per run vs a fresh one per question: fresh
-  has no drift, persistent reuses context.
-- How the implementer prompt should phrase the ask trigger ("before your
-  second attempt at the same failure", "before deviating from the plan").
-- Whether to expose the same channel over MCP for use outside opencode.
-- Rate/cost limits and an off switch
-  (`OCODESA_SUPERVISE=off|advisory|full`).
+## Watcher
+
+`agent/watcher.md` is a read-only subagent on the verifier model by default
+(`set-models.py` role `watcher`, default → verifier). It answers with
+direction only, never code, and says "report a blocker" when the plan itself
+is wrong.
+
+## Failure modes and fallbacks
+
+- No watcher agent installed → `ask_supervisor` returns "supervisor
+  unavailable" and the implementer continues.
+- Watcher call fails or times out → same; the run never depends on the
+  supervisor.
+- Threaded through `context.abort`, so cancelling the implementer cancels the
+  nested watcher request.

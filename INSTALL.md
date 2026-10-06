@@ -19,9 +19,10 @@ ln -sf "$PWD/plugins/"*.js ~/.config/opencode/plugins/
 ```
 
 `set-models.py` prompts for `planner`, `implementer`, then `orchestrator`
-(default: planner) and `verifier` (default: planner); it saves your selection,
-renders `agent.local/`, and points `~/.config/opencode/agent` at it —
-replacing any existing symlink (opencode-subagents stays on disk, unlinked).
+(default: planner), `verifier` (default: planner) and `watcher` (default:
+verifier); it saves your selection, renders `agent.local/`, and points
+`~/.config/opencode/agent` at it — replacing any existing symlink
+(opencode-subagents stays on disk, unlinked).
 
 Flags: `--list`, `--render`, `--force`, `--think` / `--no-think` (implementer
 reasoning; off by default), `--no-link`, role flags
@@ -54,3 +55,8 @@ start opencode in the project root. Then run:
 ```
 
 The orchestrator drives planner → implementer → verifier and reports.
+
+Parallel supervision is on by default once the `watcher` agent is rendered;
+set `OCODESA_SUPERVISE=off` to disable, `advisory` for canned nudges only, and
+`OCODESA_SUPERVISE_DEBUG=1` to log supervision events to
+`.ocodesa/supervise.jsonl` in the target project.

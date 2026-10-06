@@ -35,6 +35,7 @@ at 5. An audit runs only when the verifier changed application code
 | `planner` | subagent | good | Writes the blueprint (`PLAN.md`) with exact signatures, step logic, wiring, edge cases, acceptance criteria and a test plan; creates `AGENTS.md` only if missing. Replies `PLAN: ok`. |
 | `implementer` | subagent | fast | Fills in the entire blueprint in one session, writes `HANDOFF.md`. Never redesigns interfaces, never writes tests, never uses git. Resumed for fixes (`ISSUES.md`); replies `IMPL: ok` / `BLOCKED`. |
 | `verifier` | subagent | = planner | Fresh session: tests from the plan first, then spec/quality review, then fixes small/medium findings itself, appending everything to `ISSUES.md`. Re-check, audit (read-only) and fix modes. Replies `VERIFY` / `AUDIT` / `FIXED`. |
+| `watcher` | subagent | = verifier | Read-only supervisor for the running implementer. Answers `ask_supervisor` with ≤2 sentences of direction, and powers the passive advisories. Never edits. |
 
 All prompts end with the same terse voice contract.
 
@@ -53,6 +54,10 @@ All prompts end with the same terse voice contract.
 - `plugins/compaction-ledger.js` — keeps `PLAN.md`, `AGENTS.md`, `HANDOFF.md`
   and `ISSUES.md` in compaction summaries so long sessions re-read their
   durable memory.
+- `plugins/supervise.js` — parallel supervision: the implementer pulls
+  direction via `ask_supervisor`, canned advisories fire on drift signals, and
+  an async prereview injects watcher guidance while the implementer keeps
+  working. `OCODESA_SUPERVISE=off|advisory|full` (default `full`).
 
 ## Models
 
@@ -96,14 +101,17 @@ Then in any project run `/pipeline <task>`.
   [#51315](https://github.com/anomalyco/opencode/issues/51315)), so the
   orchestrator allows both. Assign free-tier models only to roles without
   denied `read`/`bash` (the planner denies `bash`).
-- **V2 sketch:** parallel good-model supervision via an `ask_supervisor` tool
-  — see [docs/supervision-v2.md](docs/supervision-v2.md).
+- **Parallel supervision.** A read-only watcher on the good model steers the
+  fast implementer mid-task: pull via `ask_supervisor`, canned drift
+  advisories, and an async prereview — see
+  [docs/supervision-v2.md](docs/supervision-v2.md).
 
 ## Verifying this repo
 
 ```bash
 python3 -m py_compile scripts/set-models.py
-node --check plugins/loop-breaker.js plugins/serialize-task.js plugins/compaction-ledger.js
+node --check plugins/loop-breaker.js plugins/serialize-task.js plugins/compaction-ledger.js plugins/supervise.js
+node --test plugins/tests/*.test.js
 python3 scripts/set-models.py --render          # re-render from models.local.json
 grep -R "__.*_MODEL__\|__IF" agent.local        # must print nothing
 ```

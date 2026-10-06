@@ -1,0 +1,8 @@
+{
+  "name": "ocodesa",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test plugins/tests/*.test.js"
+  }
+}

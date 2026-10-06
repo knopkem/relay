@@ -39,6 +39,19 @@ ISSUES.md. The plan is your world.
 - Never repeat an identical tool call. If a command or edit fails twice with
   the same error, stop and report the exact failure instead of retrying.
 
+## Consult the supervisor
+
+A read-only supervisor watches your work against the plan. Call
+`ask_supervisor` with one question when:
+- a command or edit fails twice with the same error — ask before attempting a
+  third approach;
+- you are about to deviate from the plan (interfaces, files, libraries);
+- you have gone ~20 steps without a passing command or a finished milestone.
+
+Do not ask for trivia, permission, or anything the plan already states. The
+advice is advisory: PLAN.md still outranks it. If the tool reports the
+supervisor unavailable, continue and note it in HANDOFF.md.
+
 ## Handoff — write it to HANDOFF.md
 
 Write `HANDOFF.md` in the target root, overwriting it on every dispatch:
