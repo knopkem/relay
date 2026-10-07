@@ -4,6 +4,9 @@
 .idea/
 .vscode/
 
+# Python bytecode
+__pycache__/
+
 # local OpenCode state (don't commit secrets or session data)
 .opencode/
 opencode.local.json

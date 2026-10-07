@@ -10,19 +10,21 @@ gitignored `agent.local/`.
 
 ```bash
 cd ocodesa
-python3 scripts/set-models.py
-ln -sfn "$PWD/command" ~/.config/opencode/command
-mkdir -p ~/.config/opencode/plugins
-# remove old plugin symlinks (opencode-subagents' process-gate would block this pipeline)
-find ~/.config/opencode/plugins -maxdepth 1 -name '*.js' -type l -delete
-ln -sf "$PWD/plugins/"*.js ~/.config/opencode/plugins/
+./scripts/install.sh
 ```
+
+The script renders the agents (running `set-models.py` for you if
+`models.local.json` is missing), links `command/`, and links every
+`plugins/*.js` into `~/.config/opencode/plugins/`. It is idempotent, never
+overwrites real files, prunes only symlinks it owns, and accepts `--dry-run`.
+Restart OpenCode afterwards.
 
 `set-models.py` prompts for `planner`, `implementer`, then `orchestrator`
 (default: planner), `verifier` (default: planner) and `watcher` (default:
 verifier); it saves your selection, renders `agent.local/`, and points
-`~/.config/opencode/agent` at it — replacing any existing symlink
-(opencode-subagents stays on disk, unlinked).
+`~/.config/opencode/agent` at it — replacing any existing symlink. If you
+previously installed opencode-subagents, this script leaves its plugin alone;
+remove that symlink yourself if its process gate blocks the pipeline.
 
 Flags: `--list`, `--render`, `--force`, `--think` / `--no-think` (implementer
 reasoning; off by default), `--no-link`, role flags
@@ -33,7 +35,7 @@ reasoning; off by default), `--no-link`, role flags
 
 Copy `agent/*.md`, replace the four model placeholders and the
 `# __IMPLEMENTER_OPTIONS__` marker by hand, and place the result in
-`~/.config/opencode/agent/`; copy `command/pipeline.md` to
+`~/.config/opencode/agent/`; copy `command/*.md` to
 `~/.config/opencode/command/` and `plugins/*.js` to
 `~/.config/opencode/plugins/`.
 
@@ -48,13 +50,18 @@ python3 scripts/set-models.py --think             # implementer keeps reasoning
 ## Using it
 
 OpenCode anchors the project at the nearest `.git`/`package.json` upward, so
-start opencode in the project root. Then run:
+start opencode in the project root. Write the brief to `TASK.md`, then run:
 
 ```
-/pipeline <what you want built>
+/pipeline
 ```
 
-The orchestrator drives planner → implementer → verifier and reports.
+For a short inline brief (≤ 5 lines) use `/pipeline-quick <task>` instead.
+
+The pipeline plugin drives planner → implementer → verifier; the orchestrator
+calls one tool and reports. The run state is saved to
+`.ocodesa/pipeline.json`, so asking the orchestrator for status or a resume
+(`pipeline_status`, `pipeline_resume`) continues a stopped run.
 
 Parallel supervision is on by default once the `watcher` agent is rendered;
 set `OCODESA_SUPERVISE=off` to disable, `advisory` for canned nudges only, and

@@ -1,0 +1,62 @@
+# AGENTS.md
+
+Guidance for coding agents working on this repo.
+
+## What this is
+
+ocodesa is a ticket-free subagent pipeline for OpenCode: `planner` writes
+`PLAN.md`, `implementer` fills it in and writes `HANDOFF.md`, `verifier`
+tests/reviews and appends `ISSUES.md`. The orchestrator model is a thin shim;
+`plugins/pipeline.js` drives the state machine in code. `docs/pipeline-v3.md`
+is the authoritative spec for the pipeline, `docs/supervision-v2.md` for the
+watcher — read the relevant one before changing behavior.
+
+## Layout
+
+- `agent/*.md` — agent templates. They carry `__*_MODEL__` placeholders and a
+  `# __IMPLEMENTER_OPTIONS__` marker; never hardcode model ids.
+- `command/*.md` — slash commands (`/pipeline`, `/pipeline-quick`).
+- `plugins/pipeline.js` — pipeline driver and tools (`run_pipeline`,
+  `pipeline_status`, `pipeline_resume`).
+- `plugins/supervise.js` — `ask_supervisor`, canned advisories, prereview.
+- `plugins/loop-breaker.js`, `plugins/serialize-task.js`,
+  `plugins/compaction-ledger.js` — guards; keep their behavior intact.
+- `plugins/tests/*.test.js` — `node --test`, mock clients only, no models or
+  network, no sleeping on real processes.
+- `scripts/set-models.py` — renders `agent/` into gitignored `agent.local/`
+  and links it; `scripts/install.sh` wires commands and plugins into
+  `~/.config/opencode`.
+- `models.local.json` and `agent.local/` are local-only; never commit,
+  delete or hand-edit them while linked (deleting both uninstalls every
+  agent from OpenCode).
+
+## Invariants
+
+- Routing, round counting and session ids come only from `extractProtocol`
+  replies. Never add model-driven routing; the orchestrator calls one tool
+  and summarizes.
+- Child replies are exactly one protocol line. `VERIFY: pass` always carries
+  `changed=app|tests|none`; malformed replies get one continuation, then stop.
+- OpenCode treats every module export as a plugin factory. Attach test helpers
+  as properties (`Pipeline.__test`, `Supervisor.__test`); never add a
+  non-function export or the whole plugin silently fails to load.
+- Tools are gated to `context.agent === "orchestrator"`; keep it that way.
+- Plain ESM `.js`, no build step, no new npm dependencies.
+- Preserve the agents' terse voice contract when editing prompts.
+
+## Verify before you finish
+
+```bash
+node --check plugins/*.js
+node --test plugins/tests/*.test.js
+python3 scripts/set-models.py --render --no-link   # needs models.local.json
+grep -R "__.*_MODEL__\|__IF" agent.local           # must print nothing
+```
+
+New behavior needs a test in `plugins/tests/` that fails without the change.
+Mock the OpenCode client; do not require a running model or server.
+
+Manual end-to-end: scratch dir with `TASK.md`, then
+`opencode run --agent orchestrator --command pipeline`; inspect `PLAN.md`,
+`HANDOFF.md`, `ISSUES.md` and `.ocodesa/pipeline.json`. Supervision logs to
+`.ocodesa/supervise.jsonl` with `OCODESA_SUPERVISE_DEBUG=1`.
