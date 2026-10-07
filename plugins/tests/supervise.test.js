@@ -407,15 +407,28 @@ test("supervise: escalation asks the watcher with failure signals", async () => 
   })
 })
 
-test("supervise: same-model watcher hides ask_supervisor and watcher calls", async () => {
+test("supervise: same-model watcher downgrades lazily, with no API call in the factory", async () => {
   await withMode("full", async () => {
     const agents = [
       { name: "implementer", model: { providerID: "p", modelID: "same" } },
       { name: "watcher", model: { providerID: "p", modelID: "same" } },
     ]
     const { client, prompts } = mockClient({ agents })
-    const plugin = await Supervisor({ client, directory: os.tmpdir() })
-    assert.equal(plugin.tool, undefined)
+    let agentCalls = 0
+    const counted = {
+      ...client,
+      app: {
+        agents: async (input) => {
+          agentCalls += 1
+          return client.app.agents(input)
+        },
+      },
+    }
+    const plugin = await Supervisor({ client: counted, directory: os.tmpdir() })
+    // Regression guard: an opencode API call inside the factory runs while the
+    // server is still bootstrapping and deadlocks startup into a blank TUI.
+    assert.equal(agentCalls, 0)
+    assert.ok(plugin.tool?.ask_supervisor)
     await classifyChild(plugin, "sup_same")
     const failing = {
       tool: "bash",
@@ -423,12 +436,30 @@ test("supervise: same-model watcher hides ask_supervisor and watcher calls", asy
       output: "error[E0599]: no method named `tile` found\n",
     }
     for (let i = 0; i < 3; i += 1) await plugin.event(toolEvent("sup_same", failing))
+    assert.equal(agentCalls, 1) // resolved once, on the first completed tool event
     const output = userTurn("sup_same")
     await plugin["experimental.chat.messages.transform"]({}, output)
     const text = output.messages[0].parts[0].text
     assert.match(text, /same command has failed 3 times/)
     assert.doesNotMatch(text, /ask_supervisor/)
     await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(prompts.length, 0)
+  })
+})
+
+test("supervise: ask_supervisor resolves the gate and refuses a same-model watcher without prompting", async () => {
+  await withMode("full", async () => {
+    const agents = [
+      { name: "implementer", model: { providerID: "p", modelID: "same" } },
+      { name: "watcher", model: { providerID: "p", modelID: "same" } },
+    ]
+    const { client, prompts } = mockClient({ agents })
+    const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    const reply = await plugin.tool.ask_supervisor.execute(
+      { question: "q" },
+      { agent: "implementer", sessionID: "sup_same_ask" },
+    )
+    assert.match(reply, /advisory mode; ask_supervisor is disabled/)
     assert.equal(prompts.length, 0)
   })
 })

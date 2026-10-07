@@ -14,6 +14,11 @@
 // session that persists for the implementer session, so the plan is prefilled
 // once. Everything is gated by OCODESA_SUPERVISE=off|advisory|full (default
 // full) and becomes a no-op when no watcher agent is configured.
+//
+// The same-model downgrade is resolved LAZILY (first completed tool event, the
+// first ask_supervisor call, or the first watcher prompt) — never in this
+// factory: the factory runs inside opencode's instance bootstrap, and an
+// opencode API call from there deadlocks startup into a blank TUI.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -227,33 +232,30 @@ export const Supervisor = async ({ client, directory }) => {
   }
 
   // "closed" = definitely the same model, "open" = definitely different,
-  // "unknown" = the agents API could not tell us (keep full supervision).
+  // "unknown" = the agents API has not answered yet (keep full supervision).
+  // Resolution is LAZY on purpose: this factory runs inside opencode's instance
+  // bootstrap, so calling the opencode API from it (client.app.agents) waits on
+  // a server that is itself waiting for this plugin to finish loading — startup
+  // then hangs on a blank TUI with no error in the log. The first hook that
+  // needs the gate resolves it instead.
   let watcherGate = mode === "full" ? "unknown" : "closed"
-  let hideAskTool = false
-  if (mode === "full") {
-    const pair = await detectModels(client, directory)
-    if (pair) {
-      watcherGate = modelsDiffer(pair) === false ? "closed" : "open"
-      if (watcherGate === "closed") {
-        mode = "advisory"
-        hideAskTool = true
-        writeLog({ kind: "downgrade", reason: "same-model", model: pair.implementer })
-      }
-    }
-  }
 
-  async function watcherAllowed() {
-    if (watcherGate === "closed") return false
-    if (watcherGate === "open") return true
+  async function resolveGate(reason) {
+    if (watcherGate !== "unknown") return watcherGate
     const pair = await detectModels(client, directory)
     if (pair && modelsDiffer(pair) === false) {
       watcherGate = "closed"
       mode = "advisory"
-      writeLog({ kind: "downgrade", reason: "same-model-late", model: pair.implementer })
-      return false
+      writeLog({ kind: "downgrade", reason, model: pair.implementer })
+      return watcherGate
     }
     watcherGate = "open"
-    return true
+    return watcherGate
+  }
+
+  async function watcherAllowed() {
+    if (watcherGate === "unknown") await resolveGate("same-model-late")
+    return watcherGate !== "closed"
   }
 
   function readPlan(state) {
@@ -487,6 +489,7 @@ export const Supervisor = async ({ client, directory }) => {
           if (context.agent !== "implementer") {
             return "ask_supervisor is only available to the implementer agent."
           }
+          await resolveGate("same-model-late")
           if (mode !== "full") {
             return `Supervision is in ${mode} mode; ask_supervisor is disabled. Continue with PLAN.md.`
           }
@@ -557,6 +560,7 @@ export const Supervisor = async ({ client, directory }) => {
       if (!state?.implementer) return
       const status = part.state?.status
       if (status !== "completed" && status !== "error") return
+      await resolveGate("same-model")
       record(state, part.sessionID, part)
     },
 
@@ -578,7 +582,6 @@ export const Supervisor = async ({ client, directory }) => {
       writeLog({ kind: "inject", sessionID, source: note.source, text: note.text })
     },
   }
-  if (hideAskTool) delete hooks.tool
   return hooks
 }
 
