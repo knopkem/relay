@@ -105,7 +105,6 @@ function stateFor(sessionID) {
   if (!state) {
     state = {
       implementer: false,
-      classified: false,
       entries: [],
       calls: 0,
       sincePrereview: 0,
@@ -145,15 +144,6 @@ export const Supervisor = async ({ client, directory }) => {
     } catch {
       // logging must never take the run down
     }
-  }
-
-  async function classify(state, sessionID) {
-    if (state.implementer || state.classified) return
-    state.classified = true
-    try {
-      const res = await client.session.get({ path: { id: sessionID } })
-      if (res?.data?.agent === "implementer") state.implementer = true
-    } catch {}
   }
 
   function readPlan(state) {
@@ -374,9 +364,8 @@ export const Supervisor = async ({ client, directory }) => {
         if (child && subagent === "implementer") stateFor(child).implementer = true
         return
       }
-      const state = stateFor(part.sessionID)
-      await classify(state, part.sessionID)
-      if (!state.implementer) return
+      const state = sessions.get(part.sessionID)
+      if (!state?.implementer) return
       const status = part.state?.status
       if (status !== "completed" && status !== "error") return
       record(state, part.sessionID, part)
