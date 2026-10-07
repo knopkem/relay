@@ -42,8 +42,10 @@ else:
 - audit verifier: `AUDIT: pass` | `AUDIT: fail`
 - verifier in fix mode: `FIXED: ok` | `BLOCKED: <reason>`
 
-If no expected prefix appears, STOP and report the malformed reply. Never
-guess a status, never retry the same dispatch.
+If no expected prefix appears, the child was interrupted, not finished: resume
+it **once** with the K brief for its family (below), using its saved
+`task_id`, then parse the resumed reply. If that reply is also malformed, stop
+and report both replies. Never guess a status, never continue a child twice.
 
 ## State machine
 
@@ -66,6 +68,11 @@ guess a status, never retry the same dispatch.
 One task at a time; the serialize-task plugin allows one task per model
 provider. Never dispatch two tasks in one message. Keep your own context tiny:
 no artifact reads, no report summaries in your session.
+
+A child that returns no protocol prefix was interrupted (step or context
+exhausted, aborted), not finished. Resume it **once** with its saved `task_id`
+and the matching K brief; apply the same transitions to the resumed reply.
+Only one continuation per phase, ever.
 
 ## Brief templates — copy verbatim, fill `<T>`
 
@@ -128,6 +135,32 @@ P2 polish:
 Fix only the audit findings in the latest section; keep test changes justified.
 ```
 
+K planner:
+```
+## Target: <T>
+Your previous reply was interrupted or contained no protocol line. Read
+PLAN.md and bring it up to date, then reply with exactly one line:
+PLAN: ok
+```
+
+K implementer (I and fix rounds):
+```
+## Target: <T>
+Your previous reply was interrupted or contained no protocol line. Read
+HANDOFF.md if it exists, continue the plan and keep HANDOFF.md updated, run
+the plan's build/test commands, then reply with exactly one line:
+IMPL: ok
+```
+
+K verifier (V, R, audit A, polish P2 — fill the expected line for the phase:
+`VERIFY: pass changed=app|tests|none`, `AUDIT: pass`, or `FIXED: ok`):
+```
+## Target: <T>
+Your previous reply was interrupted or contained no protocol line. Finish the
+review, write the ISSUES.md section, then reply with exactly one line:
+<expected line>
+```
+
 ## Rules
 
 - Every brief names the absolute target directory; subagents must stay inside
@@ -137,8 +170,11 @@ Fix only the audit findings in the latest section; keep test changes justified.
 - Planner, verifier and audit always run fresh (never pass a `task_id`); only
   the implementer and the polisher verifier are resumed, per the state
   machine.
-- Stop and report on any `PLAN-FAIL`, `BLOCKED`, malformed protocol line, or
-  after 5 rounds — never loop, never claim success.
+- You never create or edit files, with `edit` or with `bash` redirection; bash
+  is for checking state only. If a tool call errors or is aborted by the loop
+  breaker, stop and report — never retry it.
+- Stop and report on any `PLAN-FAIL`, `BLOCKED`, a second malformed protocol
+  line, or after 5 rounds — never loop, never claim success.
 - End the run with a short user-facing summary: what shipped, the last
   verdict, fixes made, residual risk.
 

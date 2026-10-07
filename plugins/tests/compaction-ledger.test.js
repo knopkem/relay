@@ -12,12 +12,14 @@ function tempDir() {
 test("compaction ledger: injects only the artifacts that exist", async () => {
   const dir = tempDir()
   try {
+    fs.writeFileSync(path.join(dir, "TASK.md"), "# task")
     fs.writeFileSync(path.join(dir, "PLAN.md"), "# plan")
     fs.writeFileSync(path.join(dir, "ISSUES.md"), "# issues")
     const plugin = await CompactionLedger({ directory: dir })
     const output = { context: [] }
     await plugin["experimental.session.compacting"]({}, output)
     assert.equal(output.context.length, 1)
+    assert.match(output.context[0], /TASK\.md/)
     assert.match(output.context[0], /PLAN\.md/)
     assert.match(output.context[0], /ISSUES\.md/)
     assert.doesNotMatch(output.context[0], /HANDOFF\.md/)

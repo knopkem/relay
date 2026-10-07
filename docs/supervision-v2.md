@@ -24,12 +24,18 @@ mutations reach the model; plugin tools use their bare name and receive
    uncertain.
 2. **Canned advisories.** Deterministic nudges, no model call: 15+ edits with
    no build, 40 read/search steps with no edit, the same command failing
-   twice. The note is injected into the implementer's next model step as a
-   synthetic text part via `experimental.chat.messages.transform`.
-3. **Async prereview.** Every 25 tool calls the plugin asks the watcher in the
-   background (non-blocking) to review recent actions against the plan. The
-   answer is injected when ready; notes older than two minutes are dropped, and
-   a plain `continue` is discarded.
+   three times, and 15+ edits since the last passing command. Failing
+   commands are detected from failure markers in the output (this opencode
+   build reports `metadata.exit = 0` even for failing commands). The note is
+   injected into the implementer's next model step as a synthetic text part
+   via `experimental.chat.messages.transform`.
+3. **Async prereview and escalation.** Every 25 tool calls the plugin asks the
+   watcher in the background (non-blocking) to review recent actions against
+   the plan; when an advisory trigger fires in `full` mode, it also pushes the
+   same question with the failure signals (failed runs since the last passing
+   command, recent failures). The answer is injected when ready; notes older
+   than two minutes are dropped, and a plain `continue` is discarded. If the
+   watcher is unavailable, the canned advisory stays.
 
 The watcher session persists for the implementer session, so PLAN.md is
 prefilled once. In advisory-only mode (`OCODESA_SUPERVISE=advisory`) the pull

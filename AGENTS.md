@@ -38,8 +38,8 @@ the relevant one before changing behavior.
   exactly one protocol line per reply. Keep its context tiny — no artifact
   reads, no report summaries.
 - Child replies are exactly one protocol line; `VERIFY: pass` always carries
-  `changed=app|tests|none`. A malformed reply stops the run — never guess a
-  status.
+  `changed=app|tests|none`. A malformed reply is an interrupted child: resume
+  it once with the K brief, then stop if it repeats — never guess a status.
 - OpenCode treats every module export as a plugin factory. Attach test helpers
   as properties (`Supervisor.__test`); never add a non-function export or the
   whole plugin silently fails to load.

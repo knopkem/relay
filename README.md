@@ -43,8 +43,8 @@ at 5. An audit runs only when the verifier changed application code
 (`changed=app`).
 
 1. **plan** — a fresh `planner` writes `PLAN.md` (and `AGENTS.md` if missing).
-2. **implement** — a fresh `implementer` follows the plan in one go and writes
-   `HANDOFF.md`.
+2. **implement** — a fresh `implementer` follows the plan in one go, keeping
+   `HANDOFF.md` current as it works.
 3. **verify** — a fresh `verifier` authors tests from the plan's test plan,
    reviews, fixes small/medium findings itself and appends to `ISSUES.md`.
    `VERIFY: pass changed=app` means it touched application code.
@@ -54,15 +54,16 @@ at 5. An audit runs only when the verifier changed application code
    round; `AUDIT: fail` resumes the polishing verifier. Both are capped at 5
    rounds and stopping at the cap is reported.
 
-A malformed reply stops the run and is reported. One subagent runs at a time
-(`serialize-task`).
+A reply with no protocol line means the child was interrupted; the orchestrator
+resumes it once with a continuation brief, then stops if it repeats. One
+subagent runs at a time (`serialize-task`).
 
 ## Usage
 
 | What | How |
 |---|---|
 | Run the pipeline | `/pipeline <task>` in the project root; without a task, `/pipeline` reads `TASK.md`. |
-| Stop early | Any `PLAN-FAIL`, `BLOCKED`, malformed reply, or 5 fix/polish rounds. |
+| Stop early | Any `PLAN-FAIL`, `BLOCKED`, a second malformed reply, or 5 fix/polish rounds. |
 
 Every run ends with a short user-facing summary: what shipped, the last
 verdict, fixes made, residual risk. The orchestrator only sees protocol lines
@@ -192,6 +193,10 @@ clients — no models or network. Manual end-to-end: in a scratch dir, run
   briefs are templates with a `<T>` slot. The router's whole context is a round
   counter and two task ids — no compaction, no prefill spiral, safe on a 9B
   local model.
+- **No step caps, durable state.** Agents have no `steps:` limit; the
+  implementer keeps `HANDOFF.md` current so an interrupted dispatch resumes
+  from disk. A reply without a protocol line gets one continuation prompt
+  before the orchestrator stops the run.
 - **Plan is the contract.** The implementer treats PLAN.md as authoritative
   and reports any deviation with the exact plan line instead of improvising.
 - **Tests are independent.** The implementer never writes tests; the verifier
@@ -208,5 +213,8 @@ clients — no models or network. Manual end-to-end: in a scratch dir, run
   orchestrator allows both. Assign free-tier models only to roles without
   denied `read`/`bash` (the planner denies `bash`).
 - **Parallel supervision.** A read-only watcher on the good model steers the
-  fast implementer mid-task: pull via `ask_supervisor`, canned drift
-  advisories, and an async prereview.
+  fast implementer mid-task: pull via `ask_supervisor`, failure-aware canned
+  advisories (same failing command, edits since the last passing command), a
+  watcher escalation when a trigger fires, and an async prereview. A
+  loop-breaker abort also queues a "write HANDOFF.md, then reply BLOCKED"
+  nudge.

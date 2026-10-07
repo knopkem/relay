@@ -73,6 +73,22 @@ function truncate(text, max = 80) {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s
 }
 
+// Test runners print volatile tokens (thread ids, addresses, durations) and
+// parallel output reorders lines, so byte-identical comparisons never fire.
+// Compare the normalized information instead: strip volatile tokens, ignore
+// blank lines and indentation, compare lines as a sorted set.
+function normalizeOutput(text) {
+  const lines = String(text)
+    .replace(/thread '([^']*)' \(\d+\)/g, "thread '$1' (PID)")
+    .replace(/\b0x[0-9a-fA-F]{6,}\b/g, "0xADDR")
+    .replace(/\bfinished in [\d.]+(?:ns|µs|us|ms|s)\b/g, "finished in T")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+  lines.sort()
+  return lines.join("\n")
+}
+
 function labelFor(tool, args) {
   if (tool === "bash") {
     return `bash: ${truncate(normalizeCommand(args.command ?? ""))}`
@@ -90,6 +106,12 @@ function fingerprintOf(tool, args) {
   if (tool === "bash") return `bash:${normalizeCommand(args.command ?? "")}`
   if (tool === "grep") return `grep:${args.pattern ?? ""}`
   if (tool === "glob") return `glob:${args.pattern ?? ""}`
+  if (tool === "edit" && args.oldString) {
+    return `edit:${args.filePath ?? ""}:${hash(args.oldString)}`
+  }
+  if (tool === "serena_replace_content") {
+    return `replace:${args.relative_path ?? ""}:${hash(args.needle ?? "")}`
+  }
   if (tool === "task") {
     const name = args.subagent_type ?? args.agent ?? ""
     return `task:${name}:${truncate(args.description ?? "")}`
@@ -150,20 +172,20 @@ export const LoopBreaker = async ({ client } = {}) => {
       if (state.sameRun >= SAME_ACTION_LIMIT) {
         throw trip(
           state,
-          `Loop breaker: "${labelFor(tool, args)}" ran ${state.sameRun} times in a row with no change. Stop repeating it — read the output, change the approach, or report the blocker to the caller.`,
+          `Loop breaker: "${labelFor(tool, args)}" ran ${state.sameRun} times in a row with no change. Stop repeating it — read the output, change the approach. If you are stuck, update HANDOFF.md and reply "BLOCKED: <reason>".`,
         )
       }
       if (state.editRun >= EDIT_RUN_LIMIT) {
         throw trip(
           state,
-          `Loop breaker: ${state.editRun} consecutive edits to ${state.lastFile || "one file"} without running a command. Run the project's typecheck/tests now, or stop and report what is still broken.`,
+          `Loop breaker: ${state.editRun} consecutive edits to ${state.lastFile || "one file"} without running a command. Run the project's typecheck/tests now. If you are stuck, update HANDOFF.md and reply "BLOCKED: <reason>".`,
         )
       }
       const seen = state.results.get(fp)
       if (seen && seen.repeats >= RESULT_REPEAT_LIMIT) {
         throw trip(
           state,
-          `Loop breaker: "${labelFor(tool, args)}" produced identical output ${seen.repeats} times — retrying will not change the result. Change the approach or report the blocker.`,
+          `Loop breaker: "${labelFor(tool, args)}" produced identical output ${seen.repeats} times — retrying will not change the result. Change the approach, or update HANDOFF.md and reply "BLOCKED: <reason>".`,
         )
       }
     },
@@ -174,7 +196,7 @@ export const LoopBreaker = async ({ client } = {}) => {
       if (!text) return
       const state = stateFor(input?.sessionID ?? "global")
       const fp = fingerprintOf(tool, args)
-      const h = hash(text)
+      const h = hash(normalizeOutput(text))
       const prev = state.results.get(fp)
       state.results.set(fp, {
         hash: h,
@@ -203,5 +225,6 @@ LoopBreaker.__test = {
   EDIT_RUN_LIMIT,
   TRIP_LIMIT,
   normalizeCommand,
+  normalizeOutput,
   fingerprintOf,
 }

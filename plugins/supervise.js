@@ -23,7 +23,8 @@ const ASK_MIN_INTERVAL_MS = 60_000
 const ADVISORY_MAX = 3
 const ADVISORY_MIN_INTERVAL_MS = 5 * 60_000
 const EDIT_RUN_LIMIT = 15
-const FAIL_REPEAT_LIMIT = 2
+const EDITS_SINCE_PASS_LIMIT = 15
+const FAIL_REPEAT_LIMIT = 3
 const EXPLORE_RUN_LIMIT = 40
 const PREREVIEW_EVERY = 25
 const PREREVIEW_MIN_INTERVAL_MS = 5 * 60_000
@@ -34,6 +35,8 @@ const RECORDER_SEND = 40
 const PLAN_CHAR_CAP = 30_000
 const ANSWER_CHAR_CAP = 1500
 const WATCHER_AGENT = "watcher"
+const HANDOFF_NUDGE =
+  "you are stuck in a loop; tools may lock soon. Update HANDOFF.md now — files changed, exact failing command, what remains — then stop and reply BLOCKED: <reason>."
 
 function resolveMode(value) {
   const raw = String(value ?? "full").toLowerCase()
@@ -65,6 +68,25 @@ function firstLine(text, max = 120) {
   return truncate(String(text ?? "").split("\n")[0], max)
 }
 
+// This opencode build reports metadata.exit = 0 even for failing commands, so
+// command success is inferred from common failure markers in the output.
+const FAIL_LINE_RE =
+  /^\s*(?:error(?:\[[A-Z0-9]+\])?:|FAILED\b|failures?:|panicked at|thread .* panicked|Traceback \(most recent call last\)|npm ERR!|AssertionError|[\w.$]*(?:Exception|Error):)/
+
+function failureLines(text) {
+  return String(text ?? "")
+    .split(/\r?\n/)
+    .filter((line) => FAIL_LINE_RE.test(line))
+}
+
+function outputFailed(text) {
+  return failureLines(text).length > 0
+}
+
+function firstFailureLine(text) {
+  return firstLine(failureLines(text)[0] ?? "")
+}
+
 function recorderLines(entries, limit = RECORDER_SEND) {
   return entries
     .slice(-limit)
@@ -73,16 +95,34 @@ function recorderLines(entries, limit = RECORDER_SEND) {
 }
 
 function pickAdvisory(counters) {
+  if (counters.repeatedFail) {
+    return `the same command has failed ${FAIL_REPEAT_LIMIT} times. Stop retrying — change the approach, call ask_supervisor, or report the blocker.`
+  }
+  if ((counters.editsSincePass ?? 0) >= EDITS_SINCE_PASS_LIMIT) {
+    return `${EDITS_SINCE_PASS_LIMIT}+ edits since the last passing command. Stop and rethink: run the plan's build/test command, call ask_supervisor, or report the blocker.`
+  }
   if (counters.edits >= EDIT_RUN_LIMIT) {
     return `you have made ${EDIT_RUN_LIMIT}+ edits with no build or test run. Run the plan's build/test command now, or report a blocker.`
   }
   if (counters.explore >= EXPLORE_RUN_LIMIT) {
     return `you have explored for ${EXPLORE_RUN_LIMIT} steps with no edit. Stop exploring and take the next concrete step from the plan.`
   }
-  if (counters.repeatedFail) {
-    return `the same command has failed ${FAIL_REPEAT_LIMIT} times with the same result. Stop retrying: call ask_supervisor or report the blocker.`
-  }
   return null
+}
+
+function failureSignals(state) {
+  const lines = []
+  if (state.failedRuns > 0) {
+    lines.push(`- ${state.failedRuns} failed command run(s) since the last passing command`)
+  }
+  if (state.editsSincePass > 0) {
+    lines.push(`- ${state.editsSincePass} edit(s) since the last passing command`)
+  }
+  const recent = state.entries.filter((entry) => !entry.ok).slice(-3)
+  for (const entry of recent) {
+    lines.push(`- recent failure: ${entry.summary}${entry.error ? ` — ${entry.error}` : ""}`)
+  }
+  return lines
 }
 
 function shouldPrereview(state, now) {
@@ -109,8 +149,10 @@ function stateFor(sessionID) {
       calls: 0,
       sincePrereview: 0,
       edits: 0,
+      editsSincePass: 0,
       explore: 0,
       fails: new Map(),
+      failedRuns: 0,
       advisories: 0,
       lastAdvisoryAt: 0,
       asks: 0,
@@ -192,6 +234,8 @@ export const Supervisor = async ({ client, directory }) => {
     const lines = ["You are supervising a fast implementer mid-task."]
     if (plan && !state.watcherSessionID) lines.push("", "## PLAN.md", plan)
     lines.push("## Recent actions", recorderLines(state.entries) || "- (none)")
+    const signals = failureSignals(state)
+    if (signals.length) lines.push("", "## Failure signals", ...signals)
     lines.push(heading, body)
     lines.push(
       "",
@@ -200,10 +244,12 @@ export const Supervisor = async ({ client, directory }) => {
     return lines.join("\n")
   }
 
-  function queueCanned(state, text) {
-    if (state.advisories >= ADVISORY_MAX) return
+  function queueCanned(state, text, urgent = false) {
     const now = Date.now()
-    if (now - state.lastAdvisoryAt < ADVISORY_MIN_INTERVAL_MS) return
+    if (!urgent) {
+      if (state.advisories >= ADVISORY_MAX) return
+      if (now - state.lastAdvisoryAt < ADVISORY_MIN_INTERVAL_MS) return
+    }
     if (state.pending) return
     state.advisories++
     state.lastAdvisoryAt = now
@@ -240,12 +286,47 @@ export const Supervisor = async ({ client, directory }) => {
       })
   }
 
+  // Push-based escalation: when a trigger fires, ask the watcher for direction
+  // with the failure signals; the canned advisory is already queued as a
+  // fallback, so a slow or unavailable watcher never stalls the run.
+  function escalate(state, sessionID, signal) {
+    if (mode !== "full" || state.watcherBusy) return
+    state.watcherBusy = true
+    askWatcher(
+      state,
+      sessionID,
+      watchPrompt(
+        state,
+        "## Signals",
+        `${signal}\nThe implementer looks stuck in a loop. Reply with the single most useful direction right now, at most two sentences. Do not reply continue.`,
+      ),
+    )
+      .then((text) => {
+        const value = (text ?? "").trim()
+        if (!value || /^continue\.?$/i.test(value) || state.pending) return
+        state.pending = { text: value, at: Date.now(), source: "escalation" }
+        writeLog({ kind: "escalation", sessionID, text: value })
+      })
+      .catch((error) => writeLog({ kind: "escalation-error", sessionID, error: String(error) }))
+      .finally(() => {
+        state.watcherBusy = false
+      })
+  }
+
   function record(state, sessionID, part) {
     const tool = part.tool
     const input = part.state?.input ?? {}
-    const ok = part.state?.status === "completed"
+    const output = part.state?.output ?? part.state?.metadata?.output ?? ""
+    const exit = part.state?.metadata?.exit
+    const failedExit = tool === "bash" && typeof exit === "number" && exit !== 0
+    const failedOutput = tool === "bash" && outputFailed(output)
+    const ok = part.state?.status === "completed" && !failedExit && !failedOutput
     const entry = { at: Date.now(), summary: summarizeTool(tool, input), ok }
-    if (!ok) entry.error = firstLine(part.state?.error)
+    if (!ok) {
+      entry.error =
+        firstLine(part.state?.error) ||
+        (failedExit ? `exit ${exit}` : firstFailureLine(output))
+    }
     state.entries.push(entry)
     if (state.entries.length > RECORDER_MAX) state.entries.shift()
     state.calls++
@@ -253,6 +334,7 @@ export const Supervisor = async ({ client, directory }) => {
 
     if (tool === "edit" || tool === "write" || tool === "apply_patch") {
       state.edits++
+      state.editsSincePass++
       state.explore = 0
     } else if (tool === "read" || tool === "glob" || tool === "grep" || tool === "list") {
       state.explore++
@@ -266,7 +348,10 @@ export const Supervisor = async ({ client, directory }) => {
       const fingerprint = normalizeCommand(input.command)
       if (ok) {
         state.fails.delete(fingerprint)
+        state.failedRuns = 0
+        state.editsSincePass = 0
       } else {
+        state.failedRuns++
         const seen = (state.fails.get(fingerprint) ?? 0) + 1
         if (seen >= FAIL_REPEAT_LIMIT) {
           state.fails.delete(fingerprint)
@@ -277,11 +362,21 @@ export const Supervisor = async ({ client, directory }) => {
       }
     }
 
-    const advisory = pickAdvisory({ edits: state.edits, explore: state.explore, repeatedFail })
+    if (!ok && /loop breaker/i.test(entry.error ?? "")) {
+      queueCanned(state, HANDOFF_NUDGE, true)
+    }
+
+    const advisory = pickAdvisory({
+      edits: state.edits,
+      explore: state.explore,
+      repeatedFail,
+      editsSincePass: state.editsSincePass,
+    })
     if (advisory) {
       state.edits = 0
       state.explore = 0
       queueCanned(state, advisory)
+      escalate(state, sessionID, advisory)
     }
 
     maybePrereview(state, sessionID)
@@ -379,7 +474,10 @@ export const Supervisor = async ({ client, directory }) => {
       if (!state?.pending) return
       const note = state.pending
       state.pending = null
-      if (note.source === "prereview" && Date.now() - note.at > PREREVIEW_STALE_MS) return
+      const stale =
+        (note.source === "prereview" || note.source === "escalation") &&
+        Date.now() - note.at > PREREVIEW_STALE_MS
+      if (stale) return
       const lastUser = [...messages].reverse().find((msg) => msg.info?.role === "user")
       if (!lastUser) return
       lastUser.parts.push({ type: "text", text: `[supervisor] ${note.text}`, synthetic: true })
@@ -393,8 +491,10 @@ Supervisor.__test = {
   normalizeCommand,
   summarizeTool,
   firstLine,
+  outputFailed,
   recorderLines,
   pickAdvisory,
+  failureSignals,
   shouldPrereview,
   planExcerpt,
 }

@@ -39,12 +39,16 @@ should need no judgment calls:
    Scale detail to the task: a two-file change gets a light blueprint; never
    pad, never write full function bodies.
 4. **Implementation order** — ordered milestones by integration seam; each
-   milestone ends with the project buildable and testable.
+   milestone ends with the project buildable and testable. Milestones are the
+   implementer's work: never put test-case authoring in a milestone.
 5. **Acceptance criteria** — observable statements, numbered `AC1…`.
-6. **Test plan** — per acceptance criterion: the behavior to assert, concrete
+6. **Test plan** — the verifier authors test cases from this section, never
+   the implementer. Per acceptance criterion: the behavior to assert, concrete
    scenarios including edge cases, and the exact commands to run (tests,
-   build, lint, typecheck, run). For UI projects say how to exercise the
-   primary user path (the visual check), or which tooling would be needed.
+   build, lint, typecheck, run). The implementer may set up test tooling
+   (runner, config, scripts) when a milestone says so, but writes no test
+   cases. For UI projects say how to exercise the primary user path (the
+   visual check), or which tooling would be needed.
 
 The plan is authoritative: the implementer may not redesign interfaces or
 rename files, and must report deviations with the exact PLAN.md line.

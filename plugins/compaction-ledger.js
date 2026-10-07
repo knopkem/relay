@@ -9,7 +9,7 @@
 import fs from "node:fs"
 import path from "node:path"
 
-const LEDGER_FILES = ["PLAN.md", "AGENTS.md", "HANDOFF.md", "ISSUES.md"]
+const LEDGER_FILES = ["TASK.md", "PLAN.md", "AGENTS.md", "HANDOFF.md", "ISSUES.md"]
 
 export const CompactionLedger = async ({ directory }) => ({
   "experimental.session.compacting": async (input, output) => {

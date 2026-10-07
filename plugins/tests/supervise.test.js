@@ -8,8 +8,10 @@ const {
   normalizeCommand,
   summarizeTool,
   firstLine,
+  outputFailed,
   recorderLines,
   pickAdvisory,
+  failureSignals,
   shouldPrereview,
   planExcerpt,
 } = Supervisor.__test
@@ -49,6 +51,14 @@ test("firstLine keeps one truncated line", () => {
   assert.ok(firstLine("y".repeat(300), 40).length <= 40)
 })
 
+test("outputFailed flags common failure markers", () => {
+  assert.equal(outputFailed("test result: ok. 3 passed; 0 failed"), false)
+  assert.equal(outputFailed("error[E0599]: no method named `tile` found"), true)
+  assert.equal(outputFailed("thread 'x' (1) panicked at src/a.rs:1"), true)
+  assert.equal(outputFailed("npm ERR! code ELIFECYCLE"), true)
+  assert.equal(outputFailed("src/a.rs:12: some error: text"), false)
+})
+
 test("recorderLines marks failures and caps the window", () => {
   const entries = [
     { summary: "read: a", ok: true },
@@ -67,8 +77,24 @@ test("recorderLines marks failures and caps the window", () => {
 test("pickAdvisory fires on edit runs, explore runs and repeated failures", () => {
   assert.match(pickAdvisory({ edits: 15, explore: 0, repeatedFail: false }), /edits/)
   assert.match(pickAdvisory({ edits: 0, explore: 40, repeatedFail: false }), /explored/)
-  assert.match(pickAdvisory({ edits: 0, explore: 0, repeatedFail: true }), /failed 2 times/)
+  assert.match(pickAdvisory({ edits: 0, explore: 0, repeatedFail: true }), /failed 3 times/)
+  assert.match(
+    pickAdvisory({ edits: 0, explore: 0, repeatedFail: false, editsSincePass: 15 }),
+    /since the last passing command/,
+  )
   assert.equal(pickAdvisory({ edits: 1, explore: 1, repeatedFail: false }), null)
+})
+
+test("failureSignals summarizes runs, edits and recent failures", () => {
+  const lines = failureSignals({
+    failedRuns: 2,
+    editsSincePass: 4,
+    entries: [{ ok: false, summary: "bash: cargo test", error: "exit 1" }],
+  })
+  const text = lines.join("\n")
+  assert.match(text, /2 failed command run/)
+  assert.match(text, /4 edit/)
+  assert.match(text, /bash: cargo test — exit 1/)
 })
 
 test("shouldPrereview respects cadence, budget and busy state", () => {
@@ -111,7 +137,7 @@ function mockClient() {
   return { client, gets, prompts }
 }
 
-function toolEvent(sessionID, { tool = "edit", status = "completed", input } = {}) {
+function toolEvent(sessionID, { tool = "edit", status = "completed", input, output, metadata, error } = {}) {
   return {
     event: {
       type: "message.part.updated",
@@ -123,6 +149,9 @@ function toolEvent(sessionID, { tool = "edit", status = "completed", input } = {
           state: {
             status,
             input: input ?? { filePath: "src/a.ts", content: `v${Math.random()}` },
+            output,
+            metadata,
+            error,
           },
         },
       },
@@ -243,5 +272,100 @@ test("supervise: prereview asks the watcher after 25 tool calls and injects the 
     const output = userTurn("sup_prereview")
     await plugin["experimental.chat.messages.transform"]({}, output)
     assert.match(output.messages[0].parts[0].text, /^\[supervisor\] Check src\/a\.ts first\./)
+  })
+})
+
+test("supervise: failing output counts as a failure and advises", async () => {
+  await withMode("full", async () => {
+    const { client } = mockClient()
+    const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    await classifyChild(plugin, "sup_exit")
+    const failing = {
+      tool: "bash",
+      input: { command: "cargo test" },
+      output: "error[E0599]: no method named `tile` found\n",
+    }
+    for (let i = 0; i < 3; i += 1) await plugin.event(toolEvent("sup_exit", failing))
+    const output = userTurn("sup_exit")
+    await plugin["experimental.chat.messages.transform"]({}, output)
+    assert.match(output.messages[0].parts[0].text, /same command has failed 3 times/)
+  })
+})
+
+test("supervise: a passing command resets failure counters", async () => {
+  await withMode("full", async () => {
+    const { client } = mockClient()
+    const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    await classifyChild(plugin, "sup_reset")
+    const failing = {
+      tool: "bash",
+      input: { command: "cargo test" },
+      output: "failures:\n    game::tests::test_rock_falls\n",
+    }
+    for (let i = 0; i < 2; i += 1) await plugin.event(toolEvent("sup_reset", failing))
+    await plugin.event(
+      toolEvent("sup_reset", {
+        tool: "bash",
+        input: { command: "cargo test" },
+        output: "test result: ok. 12 passed; 0 failed\n",
+      }),
+    )
+    for (let i = 0; i < 2; i += 1) await plugin.event(toolEvent("sup_reset", failing))
+    const output = userTurn("sup_reset")
+    await plugin["experimental.chat.messages.transform"]({}, output)
+    assert.equal(output.messages[0].parts.length, 0)
+  })
+})
+
+test("supervise: edits since the last passing command advise", async () => {
+  await withMode("full", async () => {
+    const { client } = mockClient()
+    const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    await classifyChild(plugin, "sup_since")
+    await plugin.event(
+      toolEvent("sup_since", { tool: "bash", input: { command: "cargo build" }, metadata: { exit: 1 } }),
+    )
+    for (let i = 0; i < 15; i += 1) await plugin.event(toolEvent("sup_since"))
+    const output = userTurn("sup_since")
+    await plugin["experimental.chat.messages.transform"]({}, output)
+    assert.match(output.messages[0].parts[0].text, /since the last passing command/)
+  })
+})
+
+test("supervise: loop-breaker errors queue the handoff nudge", async () => {
+  await withMode("full", async () => {
+    const { client } = mockClient()
+    const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    await classifyChild(plugin, "sup_handoff")
+    await plugin.event(
+      toolEvent("sup_handoff", {
+        tool: "bash",
+        status: "error",
+        input: { command: "npm test" },
+        error: "Loop breaker: 5 consecutive edits to src/a.ts without running a command.",
+      }),
+    )
+    const output = userTurn("sup_handoff")
+    await plugin["experimental.chat.messages.transform"]({}, output)
+    assert.match(output.messages[0].parts[0].text, /HANDOFF\.md/)
+    assert.match(output.messages[0].parts[0].text, /BLOCKED/)
+  })
+})
+
+test("supervise: escalation asks the watcher with failure signals", async () => {
+  await withMode("full", async () => {
+    const { client, prompts } = mockClient()
+    const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    await classifyChild(plugin, "sup_escalate")
+    const failing = {
+      tool: "bash",
+      input: { command: "cargo test" },
+      output: "error[E0599]: no method named `tile` found\n",
+    }
+    for (let i = 0; i < 3; i += 1) await plugin.event(toolEvent("sup_escalate", failing))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(prompts.length, 1)
+    assert.match(prompts[0].text, /## Failure signals/)
+    assert.match(prompts[0].text, /cargo test/)
   })
 })

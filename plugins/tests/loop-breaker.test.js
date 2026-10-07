@@ -112,3 +112,34 @@ test("loop breaker: flag variations share a fingerprint", async () => {
   await before(plugin, input, { command: 'grep -A12 "^error"' })
   await assert.rejects(() => before(plugin, input, { command: 'grep -A5 "^error"' }), /ran 3 times/)
 })
+
+test("loop breaker: volatile tokens and reordered lines count as identical output", async () => {
+  const plugin = await LoopBreaker()
+  const input = { tool: "bash", sessionID: "lb_volatile" }
+  const args = { command: "cargo test" }
+  const outputs = [
+    "thread 'a' (111) panicked at src/r.rs:1\nfailures:\n  x\n  y\nfinished in 0.01s\n",
+    "  y\nfailures:\n  x\nfinished in 0.02s\nthread 'a' (222) panicked at src/r.rs:1\n",
+    "finished in 0.03s\nthread 'a' (333) panicked at src/r.rs:1\n  y\nfailures:\n  x\n",
+  ]
+  for (const output of outputs) {
+    await plugin["tool.execute.after"](input, { args, output })
+  }
+  await assert.rejects(() => before(plugin, input, args), /identical output 3 times/)
+})
+
+test("loop breaker: same replace target variants share a fingerprint", async () => {
+  const plugin = await LoopBreaker()
+  const input = { tool: "serena_replace_content", sessionID: "lb_needle" }
+  const base = {
+    relative_path: "src/game.rs",
+    needle: "fn test_rock_falls\\(\\) \\{.*?\\n    \\}",
+  }
+  for (const repl of ["one", "two", "three"]) {
+    await plugin["tool.execute.after"](input, { args: { ...base, repl }, output: "OK" })
+  }
+  await assert.rejects(
+    () => before(plugin, input, { ...base, repl: "four" }),
+    /identical output 3 times/,
+  )
+})

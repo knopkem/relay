@@ -10,7 +10,6 @@ reasoningEffort: none
 chat_template_kwargs:
   enable_thinking: false
 temperature: 0.3
-steps: 120
 permission:
   doom_loop: deny
   task: deny
@@ -64,6 +63,10 @@ and results verbatim; findings as `file:line` + severity (blocker / should-fix
 / nit) + rationale + disposition (`fixed` / `reported`); every test change with
 its justification; blockers the implementer must fix; per-finding fixed /
 unfixed status in re-check mode; what changed in fix mode.
+
+Write the section before ending the dispatch, including on an early stop; in
+fix mode, append it before replying `BLOCKED:`. The report is durable; the
+reply is one line.
 
 ## Return protocol (required)
 

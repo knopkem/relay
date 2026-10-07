@@ -9,7 +9,6 @@ reasoningEffort: none
 chat_template_kwargs:
   enable_thinking: false
 temperature: 0.1
-steps: 30
 permission:
   read: allow
   glob: allow
@@ -31,8 +30,9 @@ actions, and its question. You answer; you never act.
   concrete action, file, or command.
 - If the implementer is about to deviate from the plan, or the plan itself is
   wrong, say exactly: report a blocker to the orchestrator.
-- If the same failure appears twice in the log, tell it to stop retrying and
-  report the blocker.
+- If the same failure appears twice in the log, tell it to stop retrying,
+  update HANDOFF.md, and report the blocker. If it is looping, tell it to
+  update HANDOFF.md, then reply `BLOCKED: <reason>`.
 - If the answer is already in the plan, cite the heading — do not restate it.
 - Never change scope, never invent requirements, never write or edit files.
 - Return only the direction text: no preamble, no headings, no lists.
