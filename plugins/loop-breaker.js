@@ -9,10 +9,17 @@
 //   - 5 consecutive edits to one file with no command run in between.
 // Each abort surfaces as a tool error telling the model to change approach
 // or report the blocker, which breaks variation loops that doom_loop misses.
+//
+// A tool error alone does not stop a weak model: it retries or evades the
+// fingerprint with tiny variations. So aborts also accumulate per session.
+// After TRIP_LIMIT aborts the session is locked: every further tool call is
+// rejected, and the first locked attempt aborts the session via the client
+// so an ignoring model cannot spin forever.
 
 const SAME_ACTION_LIMIT = 3
 const RESULT_REPEAT_LIMIT = 3
 const EDIT_RUN_LIMIT = 5
+const TRIP_LIMIT = 5
 const MAX_SESSIONS = 64
 const MAX_RESULTS = 32
 
@@ -27,6 +34,9 @@ function stateFor(sessionID) {
       results: new Map(),
       lastFile: "",
       editRun: 0,
+      trips: 0,
+      locked: false,
+      aborted: false,
     }
     sessions.set(sessionID, state)
     if (sessions.size > MAX_SESSIONS) {
@@ -40,6 +50,9 @@ function normalizeCommand(command) {
   return String(command)
     .replace(/\s*\|\s*(?:tail|head)\s+-\d+\s*/g, " ")
     .replace(/2\s*>&\s*1/g, " ")
+    .replace(/2\s*>\s*\/dev\/null/g, " ")
+    .replace(/\b(grep\s+-[ABC])\s*\d+/g, "$1#")
+    .replace(/\b(head|tail)\s+-\d+/g, "$1 -N")
     .replace(/;\s*echo\s+(['"])[^'"]*\1/g, " ")
     .replace(/^cd\s+[^&]+&&\s*/g, "")
     .replace(/\s+/g, " ")
@@ -84,67 +97,111 @@ function fingerprintOf(tool, args) {
   return `${tool}:${hash(JSON.stringify(args ?? {}))}`
 }
 
-export const LoopBreaker = async () => ({
-  "tool.execute.before": async (input, output) => {
-    const tool = input?.tool ?? ""
-    const args = output?.args ?? {}
-    const state = stateFor(input?.sessionID ?? "global")
-    const fp = fingerprintOf(tool, args)
+// Record an abort and return the error to throw. Once the session reaches
+// TRIP_LIMIT aborts it is locked and the message tells the model how to end.
+function trip(state, message) {
+  state.trips += 1
+  if (state.trips < TRIP_LIMIT) return new Error(message)
+  state.locked = true
+  return new Error(
+    `${message} — ${state.trips} aborted calls in this session; it is now locked. Stop calling tools and reply with your blocker, e.g. "BLOCKED: <reason>".`,
+  )
+}
 
-    state.sameRun = fp === state.lastFp ? state.sameRun + 1 : 1
-    state.lastFp = fp
+export const LoopBreaker = async ({ client } = {}) => {
+  async function abortSession(sessionID) {
+    if (!client || !sessionID) return
+    try {
+      await client.session.abort({ path: { id: sessionID } })
+    } catch {
+      // Best effort: the lock still rejects every further tool call.
+    }
+  }
 
-    if (tool === "edit" || tool === "write") {
-      const file = args.filePath ?? ""
-      state.editRun = file === state.lastFile ? state.editRun + 1 : 1
-      state.lastFile = file
-    } else if (tool === "bash" || tool === "task") {
-      state.lastFile = ""
-      state.editRun = 0
-    }
+  return {
+    "tool.execute.before": async (input, output) => {
+      const tool = input?.tool ?? ""
+      const args = output?.args ?? {}
+      const state = stateFor(input?.sessionID ?? "global")
+      const fp = fingerprintOf(tool, args)
 
-    if (state.sameRun >= SAME_ACTION_LIMIT) {
-      throw new Error(
-        `Loop breaker: "${labelFor(tool, args)}" ran ${state.sameRun} times in a row with no change. Stop repeating it — read the output, change the approach, or report the blocker to the caller.`,
-      )
-    }
-    if (state.editRun >= EDIT_RUN_LIMIT) {
-      throw new Error(
-        `Loop breaker: ${state.editRun} consecutive edits to ${state.lastFile || "one file"} without running a command. Run the project's typecheck/tests now, or stop and report what is still broken.`,
-      )
-    }
-    const seen = state.results.get(fp)
-    if (seen && seen.repeats >= RESULT_REPEAT_LIMIT) {
-      throw new Error(
-        `Loop breaker: "${labelFor(tool, args)}" produced identical output ${seen.repeats} times — retrying will not change the result. Change the approach or report the blocker.`,
-      )
-    }
-  },
-  "tool.execute.after": async (input, output) => {
-    const tool = input?.tool ?? ""
-    const args = output?.args ?? input?.args ?? {}
-    const text = typeof output?.output === "string" ? output.output : ""
-    if (!text) return
-    const state = stateFor(input?.sessionID ?? "global")
-    const fp = fingerprintOf(tool, args)
-    const h = hash(text)
-    const prev = state.results.get(fp)
-    state.results.set(fp, {
-      hash: h,
-      repeats: prev && prev.hash === h ? prev.repeats + 1 : 1,
-    })
-    if (state.results.size > MAX_RESULTS) {
-      state.results.delete(state.results.keys().next().value)
-    }
-  },
-  event: async ({ event } = {}) => {
-    if (event?.type !== "session.deleted" && event?.type !== "session.idle") {
-      return
-    }
-    const id =
-      event.properties?.sessionID ??
-      event.properties?.info?.id ??
-      event.properties?.info?.sessionID
-    if (id) sessions.delete(id)
-  },
-})
+      if (state.locked) {
+        if (!state.aborted) {
+          state.aborted = true
+          await abortSession(input?.sessionID)
+        }
+        throw new Error(
+          `Loop breaker: session locked after ${state.trips} aborted calls — tools are disabled. Reply with your blocker now, e.g. "BLOCKED: <reason>".`,
+        )
+      }
+
+      state.sameRun = fp === state.lastFp ? state.sameRun + 1 : 1
+      state.lastFp = fp
+
+      if (tool === "edit" || tool === "write") {
+        const file = args.filePath ?? ""
+        state.editRun = file === state.lastFile ? state.editRun + 1 : 1
+        state.lastFile = file
+      } else if (tool === "bash" || tool === "task") {
+        state.lastFile = ""
+        state.editRun = 0
+      }
+
+      if (state.sameRun >= SAME_ACTION_LIMIT) {
+        throw trip(
+          state,
+          `Loop breaker: "${labelFor(tool, args)}" ran ${state.sameRun} times in a row with no change. Stop repeating it — read the output, change the approach, or report the blocker to the caller.`,
+        )
+      }
+      if (state.editRun >= EDIT_RUN_LIMIT) {
+        throw trip(
+          state,
+          `Loop breaker: ${state.editRun} consecutive edits to ${state.lastFile || "one file"} without running a command. Run the project's typecheck/tests now, or stop and report what is still broken.`,
+        )
+      }
+      const seen = state.results.get(fp)
+      if (seen && seen.repeats >= RESULT_REPEAT_LIMIT) {
+        throw trip(
+          state,
+          `Loop breaker: "${labelFor(tool, args)}" produced identical output ${seen.repeats} times — retrying will not change the result. Change the approach or report the blocker.`,
+        )
+      }
+    },
+    "tool.execute.after": async (input, output) => {
+      const tool = input?.tool ?? ""
+      const args = output?.args ?? input?.args ?? {}
+      const text = typeof output?.output === "string" ? output.output : ""
+      if (!text) return
+      const state = stateFor(input?.sessionID ?? "global")
+      const fp = fingerprintOf(tool, args)
+      const h = hash(text)
+      const prev = state.results.get(fp)
+      state.results.set(fp, {
+        hash: h,
+        repeats: prev && prev.hash === h ? prev.repeats + 1 : 1,
+      })
+      if (state.results.size > MAX_RESULTS) {
+        state.results.delete(state.results.keys().next().value)
+      }
+    },
+    event: async ({ event } = {}) => {
+      if (event?.type !== "session.deleted" && event?.type !== "session.idle") {
+        return
+      }
+      const id =
+        event.properties?.sessionID ??
+        event.properties?.info?.id ??
+        event.properties?.info?.sessionID
+      if (id) sessions.delete(id)
+    },
+  }
+}
+
+LoopBreaker.__test = {
+  SAME_ACTION_LIMIT,
+  RESULT_REPEAT_LIMIT,
+  EDIT_RUN_LIMIT,
+  TRIP_LIMIT,
+  normalizeCommand,
+  fingerprintOf,
+}

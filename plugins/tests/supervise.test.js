@@ -92,14 +92,14 @@ test("planExcerpt caps long plans", () => {
   assert.match(capped, /plan truncated at 10 chars/)
 })
 
-function mockClient({ agent = "implementer" } = {}) {
+function mockClient() {
   const gets = []
   const prompts = []
   const client = {
     session: {
       get: async ({ path }) => {
         gets.push(path.id)
-        return { data: { id: path.id, agent } }
+        return { data: { id: path.id, agent: "implementer" } }
       },
       create: async ({ body }) => ({ data: { id: `ses_watcher_${prompts.length + 1}`, ...body } }),
       prompt: async ({ path, body }) => {
@@ -134,6 +134,26 @@ function userTurn(sessionID) {
   return { messages: [{ info: { sessionID, role: "user" }, parts: [] }] }
 }
 
+async function classifyChild(plugin, sessionID) {
+  await plugin.event({
+    event: {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "task",
+          sessionID: "ses_parent",
+          state: {
+            status: "completed",
+            input: { subagent_type: "implementer" },
+            metadata: { sessionID },
+          },
+        },
+      },
+    },
+  })
+}
+
 async function withMode(mode, fn) {
   const previous = process.env.OCODESA_SUPERVISE
   process.env.OCODESA_SUPERVISE = mode
@@ -145,55 +165,11 @@ async function withMode(mode, fn) {
   }
 }
 
-test("supervise: plugin-created implementer sessions classify and get canned advisories", async () => {
+test("supervise: task-tool implementer children classify and get advisories", async () => {
   await withMode("full", async () => {
     const { client, gets } = mockClient()
     const plugin = await Supervisor({ client, directory: os.tmpdir() })
-    for (let i = 0; i < 15; i += 1) await plugin.event(toolEvent("sup_advisory_child"))
-
-    assert.deepEqual(gets, ["sup_advisory_child"])
-    const output = userTurn("sup_advisory_child")
-    await plugin["experimental.chat.messages.transform"]({}, output)
-    assert.equal(output.messages[0].parts.length, 1)
-    assert.match(output.messages[0].parts[0].text, /^\[supervisor\] you have made 15\+ edits/)
-    assert.equal(output.messages[0].parts[0].synthetic, true)
-  })
-})
-
-test("supervise: non-implementer sessions classify once and are never recorded", async () => {
-  await withMode("full", async () => {
-    const { client, gets } = mockClient({ agent: "build" })
-    const plugin = await Supervisor({ client, directory: os.tmpdir() })
-    for (let i = 0; i < 20; i += 1) await plugin.event(toolEvent("ses_other"))
-
-    assert.deepEqual(gets, ["ses_other"])
-    const output = userTurn("ses_other")
-    await plugin["experimental.chat.messages.transform"]({}, output)
-    assert.equal(output.messages[0].parts.length, 0)
-  })
-})
-
-test("supervise: task-tool implementer children classify without session.get", async () => {
-  await withMode("full", async () => {
-    const { client, gets } = mockClient()
-    const plugin = await Supervisor({ client, directory: os.tmpdir() })
-    await plugin.event({
-      event: {
-        type: "message.part.updated",
-        properties: {
-          part: {
-            type: "tool",
-            tool: "task",
-            sessionID: "ses_parent",
-            state: {
-              status: "completed",
-              input: { subagent_type: "implementer" },
-              metadata: { sessionID: "sup_task_child" },
-            },
-          },
-        },
-      },
-    })
+    await classifyChild(plugin, "sup_task_child")
     for (let i = 0; i < 15; i += 1) await plugin.event(toolEvent("sup_task_child"))
 
     assert.deepEqual(gets, [])
@@ -235,6 +211,7 @@ test("supervise: advisory mode disables ask_supervisor but keeps canned advisori
     )
     assert.match(reply, /advisory mode; ask_supervisor is disabled/)
 
+    await classifyChild(plugin, "sup_advisory_mode")
     for (let i = 0; i < 15; i += 1) await plugin.event(toolEvent("sup_advisory_mode"))
     const output = userTurn("sup_advisory_mode")
     await plugin["experimental.chat.messages.transform"]({}, output)
@@ -254,6 +231,7 @@ test("supervise: prereview asks the watcher after 25 tool calls and injects the 
   await withMode("full", async () => {
     const { client, prompts } = mockClient()
     const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    await classifyChild(plugin, "sup_prereview")
     for (let i = 0; i < 25; i += 1) {
       await plugin.event(toolEvent("sup_prereview", { tool: "read", input: { filePath: "src/a.ts" } }))
     }

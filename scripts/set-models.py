@@ -3,11 +3,11 @@
 
 The repository stores placeholders (`__ORCHESTRATOR_MODEL__`,
 `__PLANNER_MODEL__`, `__VERIFIER_MODEL__`, `__IMPLEMENTER_MODEL__`,
-`# __IMPLEMENTER_OPTIONS__`); your selection is saved to gitignored
-`models.local.json` and rendered into gitignored `agent.local/`, which is
-symlinked into `~/.config/opencode/agent` (replacing any existing agent-dir
-symlink). Unset roles default: verifier -> planner, orchestrator -> planner,
-watcher -> verifier.
+`# __IMPLEMENTER_OPTIONS__`, `# __PLANNER_OPTIONS__`); your selection is saved
+to gitignored `models.local.json` and rendered into gitignored `agent.local/`,
+which is symlinked into `~/.config/opencode/agent` (replacing any existing
+agent-dir symlink). Unset roles default: verifier -> planner,
+orchestrator -> planner, watcher -> verifier.
 
 Roles:
     orchestrator -> orchestrator.md
@@ -25,6 +25,8 @@ Usage:
     scripts/set-models.py --render             re-render from models.local.json
     scripts/set-models.py --think ...          implementer keeps its reasoning
     scripts/set-models.py --no-think ...       implementer reasoning off (default)
+    scripts/set-models.py --planner-effort L   planner reasoning level
+                                               (none|low|medium|high|xhigh; default low)
     scripts/set-models.py --force ...          allow ids not in `opencode models`
     scripts/set-models.py --no-link ...        don't touch ~/.config/opencode/agent
 """
@@ -53,9 +55,13 @@ ROLE_FILES = {
 }
 ROLE_TOKENS = {role: f"__{role.upper()}_MODEL__" for role in ROLES}
 ROLE_FLAGS = {f"--{role}": role for role in ROLES}
+VALUE_FLAGS = {**ROLE_FLAGS, "--planner-effort": "planner_effort"}
 ROLE_DEFAULTS = {"orchestrator": "planner", "verifier": "planner", "watcher": "verifier"}
 MODEL_TOKEN = re.compile(r"__[A-Z]+_MODEL__")
 OPTIONS_MARKER = "# __IMPLEMENTER_OPTIONS__"
+PLANNER_OPTIONS_MARKER = "# __PLANNER_OPTIONS__"
+PLANNER_EFFORTS = ("none", "low", "medium", "high", "xhigh")
+PLANNER_EFFORT_DEFAULT = "low"
 IMPLEMENTER_OPTIONS = (
     "reasoningEffort: low\nchat_template_kwargs:\n  enable_thinking: false"
 )
@@ -135,9 +141,17 @@ def save_selection(selection):
     SELECTION.write_text(json.dumps(selection, indent=2) + "\n")
 
 
+def validate_effort(selection):
+    effort = selection.get("planner_effort") or PLANNER_EFFORT_DEFAULT
+    if effort not in PLANNER_EFFORTS:
+        sys.exit(f"error: planner_effort must be one of: {', '.join(PLANNER_EFFORTS)}")
+    return effort
+
+
 def render(selection, link=True):
     OUT_DIR.mkdir(exist_ok=True)
     roles = resolve_roles(selection)
+    effort = validate_effort(selection)
     written = []
     for role in ROLES:
         name = ROLE_FILES[role]
@@ -155,6 +169,12 @@ def render(selection, link=True):
                 text = text.replace(OPTIONS_MARKER + "\n", "")
         elif role == "implementer":
             sys.exit(f"error: {TEMPLATE_DIR / name}: no {OPTIONS_MARKER}")
+        if PLANNER_OPTIONS_MARKER in text:
+            text = text.replace(
+                PLANNER_OPTIONS_MARKER + "\n", f"reasoningEffort: {effort}\n"
+            )
+        elif role == "planner":
+            sys.exit(f"error: {TEMPLATE_DIR / name}: no {PLANNER_OPTIONS_MARKER}")
         (OUT_DIR / name).write_text(text)
         written.append((name, roles[role]))
 
@@ -182,15 +202,15 @@ def link_config():
 
 
 def parse_args(argv):
-    role_flags = {}
+    value_flags = {}
     positional = []
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg in ROLE_FLAGS:
+        if arg in VALUE_FLAGS:
             if i + 1 >= len(argv):
-                sys.exit(f"error: {arg} needs a model value")
-            role_flags[ROLE_FLAGS[arg]] = argv[i + 1]
+                sys.exit(f"error: {arg} needs a value")
+            value_flags[VALUE_FLAGS[arg]] = argv[i + 1]
             i += 2
             continue
         if arg.startswith("--"):
@@ -198,7 +218,7 @@ def parse_args(argv):
             continue
         positional.append(arg)
         i += 1
-    return role_flags, positional
+    return value_flags, positional
 
 
 def validate(selection, models, force):
@@ -232,8 +252,15 @@ def main():
         selection = load_selection()
         if not selection:
             sys.exit(f"error: {SELECTION} not found; run set-models.py first")
+        changed = False
+        if role_flags:
+            selection.update(role_flags)
+            changed = True
         if think or no_think:
             selection["implementer_think"] = bool(think and not no_think)
+            changed = True
+        if changed:
+            validate_effort(selection)
             save_selection(selection)
         render(selection, link=link)
         return
@@ -280,6 +307,7 @@ def main():
         selection.setdefault("implementer_think", False)
 
     validate(selection, models, force)
+    validate_effort(selection)
 
     save_selection(selection)
     print(f"saved {SELECTION}")

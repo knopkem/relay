@@ -6,6 +6,7 @@ description: >-
 mode: subagent
 model: __PLANNER_MODEL__
 temperature: 0.6
+# __PLANNER_OPTIONS__
 permission:
   read: allow
   edit:
@@ -54,6 +55,8 @@ what you found in the code or the request states; never overwrite an existing
 AGENTS.md and never invent conventions.
 
 Rules:
+- The request arrives as `## Goal:` text or as a `## Brief: <path>` file; for a
+  brief file, read it first and treat its contents as the request.
 - Work only inside the target directory. Never read, glob, grep or list parent
   or sibling directories; never copy conventions from another project.
 - Write no application code and no test files — PLAN.md and AGENTS.md only.
@@ -61,7 +64,11 @@ Rules:
 
 ## Return protocol (required)
 
-Your entire final reply must be exactly one line:
+Write each report file at most once; a successful write is final. Never
+rewrite or re-read a file you just wrote.
+
+When done, stop calling tools: your final message is the protocol line below,
+with no tool calls and no prose:
 - success: `PLAN: ok`
 - failure: `PLAN-FAIL: <one line reason>`
 

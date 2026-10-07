@@ -76,6 +76,13 @@ P planner:
 Write PLAN.md.
 ```
 
+P2 planner, empty request — brief lives in `TASK.md`:
+```
+## Target: <T>
+## Brief: <T>/TASK.md
+Read the brief file first. Write PLAN.md.
+```
+
 I implement:
 ```
 ## Target: <T>
@@ -125,6 +132,8 @@ Fix only the audit findings in the latest section; keep test changes justified.
 
 - Every brief names the absolute target directory; subagents must stay inside
   it and must read their docs before acting.
+- When the user's request is empty, use P2 with `<T>/TASK.md`; pass the path,
+  never the contents. If `TASK.md` is missing, stop and ask for a task.
 - Planner, verifier and audit always run fresh (never pass a `task_id`); only
   the implementer and the polisher verifier are resumed, per the state
   machine.

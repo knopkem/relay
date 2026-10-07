@@ -63,3 +63,52 @@ test("loop breaker: session.deleted clears the session state", async () => {
   await before(plugin, input, args)
   await assert.rejects(() => before(plugin, input, args), /ran 3 times/)
 })
+
+const TRIP_LIMIT = LoopBreaker.__test.TRIP_LIMIT
+
+const tripSession = async (plugin, sessionID) => {
+  const input = { tool: "bash", sessionID }
+  for (let i = 0; i < TRIP_LIMIT; i += 1) {
+    const args = { command: `distinct-action-${i}` }
+    await before(plugin, input, args)
+    await before(plugin, input, args)
+    await assert.rejects(() => before(plugin, input, args), /ran 3 times/)
+  }
+  return input
+}
+
+test("loop breaker: TRIP_LIMIT aborts lock the session", async () => {
+  const plugin = await LoopBreaker()
+  const input = await tripSession(plugin, "lb_lock")
+  await assert.rejects(
+    () => before(plugin, input, { command: "fresh-idea" }),
+    /session locked .* tools are disabled/,
+  )
+})
+
+test("loop breaker: first locked call aborts the session once", async () => {
+  const aborts = []
+  const plugin = await LoopBreaker({
+    client: {
+      session: {
+        abort: async (options) => {
+          aborts.push(options)
+        },
+      },
+    },
+  })
+  const input = await tripSession(plugin, "lb_abort")
+  assert.equal(aborts.length, 0)
+  await assert.rejects(() => before(plugin, input, { command: "ignored" }), /tools are disabled/)
+  assert.deepEqual(aborts, [{ path: { id: "lb_abort" } }])
+  await assert.rejects(() => before(plugin, input, { command: "ignored again" }), /tools are disabled/)
+  assert.equal(aborts.length, 1)
+})
+
+test("loop breaker: flag variations share a fingerprint", async () => {
+  const plugin = await LoopBreaker()
+  const input = { tool: "bash", sessionID: "lb_flags" }
+  await before(plugin, input, { command: 'grep -A4 "^error"' })
+  await before(plugin, input, { command: 'grep -A12 "^error"' })
+  await assert.rejects(() => before(plugin, input, { command: 'grep -A5 "^error"' }), /ran 3 times/)
+})
