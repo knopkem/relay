@@ -41,6 +41,12 @@ The watcher session persists for the implementer session, so PLAN.md is
 prefilled once. In advisory-only mode (`OCODESA_SUPERVISE=advisory`) the pull
 tool and prereview are disabled and only canned advisories run.
 
+**Same-model guard.** At startup the plugin compares the `implementer` and
+`watcher` models via the agents API. When they are identical, supervision
+auto-downgrades to advisory-only and `ask_supervisor` is not registered — a
+watcher on the implementer's own model adds no information. If the API cannot
+tell the models apart, full supervision is kept.
+
 ## Configuration
 
 - `OCODESA_SUPERVISE=off|advisory|full` — default `full`. `off` makes the
@@ -56,7 +62,8 @@ tool and prereview are disabled and only canned advisories run.
 `agent/watcher.md` is a read-only subagent on the verifier model by default
 (`set-models.py` role `watcher`, default → verifier). It answers with
 direction only, never code, and says "report a blocker" when the plan itself
-is wrong.
+is wrong. Point it at a different model than `implementer`; otherwise the
+same-model guard makes supervision advisory-only.
 
 ## Failure modes and fallbacks
 

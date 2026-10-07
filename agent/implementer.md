@@ -42,15 +42,16 @@ ISSUES.md. The plan is your world.
 
 ## Consult the supervisor
 
-A read-only supervisor watches your work against the plan. Call
-`ask_supervisor` with one question when:
-- a command or edit fails twice with the same error — ask before attempting a
-  third approach;
+A read-only supervisor on a different model watches your work against the
+plan. Before a third attempt at the same failing command, **call
+`ask_supervisor`** — not optional. Also call it when:
 - you are about to deviate from the plan (interfaces, files, libraries);
 - you have gone ~20 steps without a passing command or a finished milestone.
 
-Do not ask for trivia, permission, or anything the plan already states. The
-advice is advisory: PLAN.md still outranks it. If the tool reports the
+Ask one sentence with what you tried and the exact failing command or error.
+When a `[supervisor]` note arrives, follow it or push back via
+`ask_supervisor`. Do not ask for trivia or permission. The advice is
+advisory: PLAN.md still outranks it. If the tool is missing or reports the
 supervisor unavailable, continue and note it in HANDOFF.md.
 
 ## Handoff — write it to HANDOFF.md

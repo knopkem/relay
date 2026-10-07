@@ -152,6 +152,13 @@ def render(selection, link=True):
     OUT_DIR.mkdir(exist_ok=True)
     roles = resolve_roles(selection)
     effort = validate_effort(selection)
+    if roles.get("watcher") and roles.get("watcher") == roles.get("implementer"):
+        print(
+            f"warning: watcher model equals implementer model ({roles['implementer']}); "
+            "supervision will be advisory-only — use --watcher <different model> "
+            "to enable it.",
+            file=sys.stderr,
+        )
     written = []
     for role in ROLES:
         name = ROLE_FILES[role]
@@ -234,10 +241,9 @@ def validate(selection, models, force):
 
 def main():
     args = sys.argv[1:]
-    models = list_models()
 
     if "--list" in args:
-        for i, m in enumerate(models, 1):
+        for i, m in enumerate(list_models(), 1):
             print(f"{i:>3}) {m}")
         return
 
@@ -265,6 +271,7 @@ def main():
         render(selection, link=link)
         return
 
+    models = list_models()
     selection = load_selection() or {}
 
     if positional:

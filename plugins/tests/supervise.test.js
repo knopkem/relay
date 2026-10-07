@@ -12,6 +12,9 @@ const {
   recorderLines,
   pickAdvisory,
   failureSignals,
+  agentModels,
+  modelsDiffer,
+  withAskReminder,
   shouldPrereview,
   planExcerpt,
 } = Supervisor.__test
@@ -59,6 +62,37 @@ test("outputFailed flags common failure markers", () => {
   assert.equal(outputFailed("src/a.rs:12: some error: text"), false)
 })
 
+test("modelsDiffer compares the implementer and watcher models", () => {
+  const same = agentModels([
+    { name: "implementer", model: { providerID: "p", modelID: "m" } },
+    { name: "watcher", model: { providerID: "p", modelID: "m" } },
+  ])
+  assert.deepEqual(same, { implementer: "p/m", watcher: "p/m" })
+  assert.equal(modelsDiffer(same), false)
+  assert.equal(
+    modelsDiffer(
+      agentModels([
+        { name: "implementer", model: { providerID: "p", modelID: "m" } },
+        { name: "watcher", model: { providerID: "p", modelID: "other" } },
+      ]),
+    ),
+    true,
+  )
+  assert.equal(modelsDiffer(agentModels([])), null)
+  assert.equal(
+    modelsDiffer(agentModels([{ name: "watcher", model: { providerID: "p", modelID: "m" } }])),
+    null,
+  )
+})
+
+test("withAskReminder nudges when the previous advisory was ignored", () => {
+  const base = { supervisorEnabled: true, advisories: 1, asks: 0, asksAtLastAdvisory: 0 }
+  assert.match(withAskReminder("stop", base), /did not use ask_supervisor/)
+  assert.equal(withAskReminder("stop", { ...base, asks: 1 }), "stop")
+  assert.equal(withAskReminder("stop", { ...base, supervisorEnabled: false }), "stop")
+  assert.equal(withAskReminder("stop", { ...base, advisories: 0 }), "stop")
+})
+
 test("recorderLines marks failures and caps the window", () => {
   const entries = [
     { summary: "read: a", ok: true },
@@ -78,6 +112,8 @@ test("pickAdvisory fires on edit runs, explore runs and repeated failures", () =
   assert.match(pickAdvisory({ edits: 15, explore: 0, repeatedFail: false }), /edits/)
   assert.match(pickAdvisory({ edits: 0, explore: 40, repeatedFail: false }), /explored/)
   assert.match(pickAdvisory({ edits: 0, explore: 0, repeatedFail: true }), /failed 3 times/)
+  assert.match(pickAdvisory({ edits: 0, explore: 0, repeatedFail: true }, true), /ask_supervisor/)
+  assert.doesNotMatch(pickAdvisory({ edits: 0, explore: 0, repeatedFail: true }, false), /ask_supervisor/)
   assert.match(
     pickAdvisory({ edits: 0, explore: 0, repeatedFail: false, editsSincePass: 15 }),
     /since the last passing command/,
@@ -118,10 +154,11 @@ test("planExcerpt caps long plans", () => {
   assert.match(capped, /plan truncated at 10 chars/)
 })
 
-function mockClient() {
+function mockClient({ agents } = {}) {
   const gets = []
   const prompts = []
   const client = {
+    ...(agents ? { app: { agents: async () => ({ data: agents }) } } : {}),
     session: {
       get: async ({ path }) => {
         gets.push(path.id)
@@ -367,5 +404,52 @@ test("supervise: escalation asks the watcher with failure signals", async () => 
     assert.equal(prompts.length, 1)
     assert.match(prompts[0].text, /## Failure signals/)
     assert.match(prompts[0].text, /cargo test/)
+  })
+})
+
+test("supervise: same-model watcher hides ask_supervisor and watcher calls", async () => {
+  await withMode("full", async () => {
+    const agents = [
+      { name: "implementer", model: { providerID: "p", modelID: "same" } },
+      { name: "watcher", model: { providerID: "p", modelID: "same" } },
+    ]
+    const { client, prompts } = mockClient({ agents })
+    const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    assert.equal(plugin.tool, undefined)
+    await classifyChild(plugin, "sup_same")
+    const failing = {
+      tool: "bash",
+      input: { command: "cargo test" },
+      output: "error[E0599]: no method named `tile` found\n",
+    }
+    for (let i = 0; i < 3; i += 1) await plugin.event(toolEvent("sup_same", failing))
+    const output = userTurn("sup_same")
+    await plugin["experimental.chat.messages.transform"]({}, output)
+    const text = output.messages[0].parts[0].text
+    assert.match(text, /same command has failed 3 times/)
+    assert.doesNotMatch(text, /ask_supervisor/)
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(prompts.length, 0)
+  })
+})
+
+test("supervise: different models keep the ask tool and full behavior", async () => {
+  await withMode("full", async () => {
+    const agents = [
+      { name: "implementer", model: { providerID: "p", modelID: "small" } },
+      { name: "watcher", model: { providerID: "p", modelID: "big" } },
+    ]
+    const { client, prompts } = mockClient({ agents })
+    const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    assert.ok(plugin.tool?.ask_supervisor)
+    await classifyChild(plugin, "sup_diff")
+    const failing = {
+      tool: "bash",
+      input: { command: "cargo test" },
+      output: "error[E0599]: no method named `tile` found\n",
+    }
+    for (let i = 0; i < 3; i += 1) await plugin.event(toolEvent("sup_diff", failing))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(prompts.length, 1)
   })
 })

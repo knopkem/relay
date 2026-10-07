@@ -217,4 +217,5 @@ clients — no models or network. Manual end-to-end: in a scratch dir, run
   advisories (same failing command, edits since the last passing command), a
   watcher escalation when a trigger fires, and an async prereview. A
   loop-breaker abort also queues a "write HANDOFF.md, then reply BLOCKED"
-  nudge.
+  nudge. When the watcher model equals the implementer's, supervision drops
+  to advisory-only and `ask_supervisor` is hidden.

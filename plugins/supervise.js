@@ -94,12 +94,15 @@ function recorderLines(entries, limit = RECORDER_SEND) {
     .join("\n")
 }
 
-function pickAdvisory(counters) {
+function pickAdvisory(counters, supervisorEnabled = true) {
+  const orAsk = supervisorEnabled
+    ? "call ask_supervisor, or report the blocker"
+    : "or report the blocker"
   if (counters.repeatedFail) {
-    return `the same command has failed ${FAIL_REPEAT_LIMIT} times. Stop retrying — change the approach, call ask_supervisor, or report the blocker.`
+    return `the same command has failed ${FAIL_REPEAT_LIMIT} times. Stop retrying — change the approach, ${orAsk}.`
   }
   if ((counters.editsSincePass ?? 0) >= EDITS_SINCE_PASS_LIMIT) {
-    return `${EDITS_SINCE_PASS_LIMIT}+ edits since the last passing command. Stop and rethink: run the plan's build/test command, call ask_supervisor, or report the blocker.`
+    return `${EDITS_SINCE_PASS_LIMIT}+ edits since the last passing command. Stop and rethink: run the plan's build/test command, ${orAsk}.`
   }
   if (counters.edits >= EDIT_RUN_LIMIT) {
     return `you have made ${EDIT_RUN_LIMIT}+ edits with no build or test run. Run the plan's build/test command now, or report a blocker.`
@@ -123,6 +126,40 @@ function failureSignals(state) {
     lines.push(`- recent failure: ${entry.summary}${entry.error ? ` — ${entry.error}` : ""}`)
   }
   return lines
+}
+
+// Model-aware supervision: a watcher on the implementer's own model adds no
+// information, so supervision auto-downgrades to advisory-only when the two
+// configured models are identical. Unknown models keep full supervision.
+function agentModels(agents) {
+  const list = Array.isArray(agents) ? agents : []
+  const format = (model) =>
+    model && model.providerID && model.modelID ? `${model.providerID}/${model.modelID}` : null
+  const find = (name) => list.find((agent) => agent?.name === name)?.model
+  return { implementer: format(find("implementer")), watcher: format(find("watcher")) }
+}
+
+function modelsDiffer({ implementer, watcher }) {
+  if (!implementer || !watcher) return null
+  return implementer !== watcher
+}
+
+async function detectModels(client, directory) {
+  try {
+    const res = await client.app.agents({ query: { directory } })
+    if (res?.error) return null
+    return agentModels(res?.data)
+  } catch {
+    return null
+  }
+}
+
+function withAskReminder(text, { supervisorEnabled, advisories, asks, asksAtLastAdvisory }) {
+  if (!supervisorEnabled) return text
+  if (advisories > 0 && asks === asksAtLastAdvisory) {
+    return `${text} You did not use ask_supervisor for the previous advisory — call it now with the exact failing command.`
+  }
+  return text
 }
 
 function shouldPrereview(state, now) {
@@ -156,6 +193,7 @@ function stateFor(sessionID) {
       advisories: 0,
       lastAdvisoryAt: 0,
       asks: 0,
+      asksAtLastAdvisory: 0,
       lastAskAt: 0,
       prereviews: 0,
       lastPrereviewAt: 0,
@@ -171,7 +209,7 @@ function stateFor(sessionID) {
 }
 
 export const Supervisor = async ({ client, directory }) => {
-  const mode = resolveMode(process.env.OCODESA_SUPERVISE)
+  let mode = resolveMode(process.env.OCODESA_SUPERVISE)
   if (mode === "off") return {}
 
   function writeLog(entry) {
@@ -188,6 +226,36 @@ export const Supervisor = async ({ client, directory }) => {
     }
   }
 
+  // "closed" = definitely the same model, "open" = definitely different,
+  // "unknown" = the agents API could not tell us (keep full supervision).
+  let watcherGate = mode === "full" ? "unknown" : "closed"
+  let hideAskTool = false
+  if (mode === "full") {
+    const pair = await detectModels(client, directory)
+    if (pair) {
+      watcherGate = modelsDiffer(pair) === false ? "closed" : "open"
+      if (watcherGate === "closed") {
+        mode = "advisory"
+        hideAskTool = true
+        writeLog({ kind: "downgrade", reason: "same-model", model: pair.implementer })
+      }
+    }
+  }
+
+  async function watcherAllowed() {
+    if (watcherGate === "closed") return false
+    if (watcherGate === "open") return true
+    const pair = await detectModels(client, directory)
+    if (pair && modelsDiffer(pair) === false) {
+      watcherGate = "closed"
+      mode = "advisory"
+      writeLog({ kind: "downgrade", reason: "same-model-late", model: pair.implementer })
+      return false
+    }
+    watcherGate = "open"
+    return true
+  }
+
   function readPlan(state) {
     try {
       const file = path.join(directory, "PLAN.md")
@@ -202,6 +270,9 @@ export const Supervisor = async ({ client, directory }) => {
   }
 
   async function askWatcher(state, ownerSessionID, promptText, signal) {
+    if (!(await watcherAllowed())) {
+      throw new Error("watcher disabled: same model as the implementer")
+    }
     if (!state.watcherSessionID) {
       const created = await client.session.create({
         body: { title: `supervisor for ${ownerSessionID}`, parentID: ownerSessionID },
@@ -366,16 +437,27 @@ export const Supervisor = async ({ client, directory }) => {
       queueCanned(state, HANDOFF_NUDGE, true)
     }
 
-    const advisory = pickAdvisory({
-      edits: state.edits,
-      explore: state.explore,
-      repeatedFail,
-      editsSincePass: state.editsSincePass,
-    })
+    const supervisorEnabled = watcherGate !== "closed"
+    const advisory = pickAdvisory(
+      {
+        edits: state.edits,
+        explore: state.explore,
+        repeatedFail,
+        editsSincePass: state.editsSincePass,
+      },
+      supervisorEnabled,
+    )
     if (advisory) {
       state.edits = 0
       state.explore = 0
-      queueCanned(state, advisory)
+      const text = withAskReminder(advisory, {
+        supervisorEnabled,
+        advisories: state.advisories,
+        asks: state.asks,
+        asksAtLastAdvisory: state.asksAtLastAdvisory,
+      })
+      queueCanned(state, text)
+      state.asksAtLastAdvisory = state.asks
       escalate(state, sessionID, advisory)
     }
 
@@ -390,7 +472,7 @@ export const Supervisor = async ({ client, directory }) => {
     return JSON.stringify(error)
   }
 
-  return {
+  const hooks = {
     tool: {
       ask_supervisor: {
         description:
@@ -447,7 +529,19 @@ export const Supervisor = async ({ client, directory }) => {
     event: async ({ event } = {}) => {
       if (event?.type === "session.deleted") {
         const id = event.properties?.info?.id ?? event.properties?.sessionID
-        if (id) sessions.delete(id)
+        if (id) {
+          const state = sessions.get(id)
+          if (state?.implementer) {
+            writeLog({
+              kind: "session-summary",
+              sessionID: id,
+              asks: state.asks,
+              advisories: state.advisories,
+              calls: state.calls,
+            })
+          }
+          sessions.delete(id)
+        }
         return
       }
       if (event?.type !== "message.part.updated") return
@@ -484,6 +578,8 @@ export const Supervisor = async ({ client, directory }) => {
       writeLog({ kind: "inject", sessionID, source: note.source, text: note.text })
     },
   }
+  if (hideAskTool) delete hooks.tool
+  return hooks
 }
 
 Supervisor.__test = {
@@ -495,6 +591,9 @@ Supervisor.__test = {
   recorderLines,
   pickAdvisory,
   failureSignals,
+  agentModels,
+  modelsDiffer,
+  withAskReminder,
   shouldPrereview,
   planExcerpt,
 }
