@@ -4,6 +4,9 @@
 .idea/
 .vscode/
 
+# Python bytecode
+__pycache__/
+
 # local OpenCode state (don't commit secrets or session data)
 .opencode/
 opencode.local.json
@@ -11,3 +14,6 @@ opencode.local.json
 # local model selection and its rendered agents
 models.local.json
 agent.local/
+
+# rendered jeff-code role config (see docs/jeff-runtime-port.md)
+jeff/config.local.json

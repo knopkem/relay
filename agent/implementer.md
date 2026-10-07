@@ -7,7 +7,6 @@ mode: subagent
 model: __IMPLEMENTER_MODEL__
 # __IMPLEMENTER_OPTIONS__
 temperature: 0.1
-steps: 200
 permission:
   doom_loop: deny
   task: deny
@@ -38,10 +37,14 @@ ISSUES.md. The plan is your world.
 - Never run git commands — no commits, branches or stashes.
 - Never repeat an identical tool call. If a command or edit fails twice with
   the same error, stop and report the exact failure instead of retrying.
+- A long task is never a reason to stop early. Keep going until the plan is
+  implemented or you are truly blocked.
 
 ## Handoff — write it to HANDOFF.md
 
-Write `HANDOFF.md` in the target root, overwriting it on every dispatch:
+Maintain `HANDOFF.md` in the target root as you work: create it once the first
+milestone is done, and update it after each milestone and before deep
+debugging or long command runs. Overwrite it on every dispatch:
 
 1. Files changed — exact paths;
 2. Plan coverage — files and milestones implemented;
@@ -54,6 +57,10 @@ Write `HANDOFF.md` in the target root, overwriting it on every dispatch:
 In fix mode (`## Fix` in the brief): read ISSUES.md, fix only the findings
 still open in the latest section, keep interfaces per plan, do not refactor
 unrelated code, update HANDOFF.md, and map each finding to its resolution.
+
+Before replying `BLOCKED:`, update HANDOFF.md so the latest state — files
+changed, exact failing command, what remains — is on disk. The reply is one
+line; the handoff is the report.
 
 ## Return protocol (required)
 

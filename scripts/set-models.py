@@ -8,6 +8,11 @@ The repository stores placeholders (`__ORCHESTRATOR_MODEL__`,
 symlinked into `~/.config/opencode/agent` (replacing any existing agent-dir
 symlink). Unset roles default: verifier -> planner, orchestrator -> planner.
 
+The same selection renders gitignored `jeff/config.local.json` for the
+jeff-code runtime (see docs/jeff-runtime-port.md): the planner and verifier
+models run as `jeff --mode rpc` children with the roles' thinking levels and
+tool allowlists.
+
 Roles:
     orchestrator -> orchestrator.md
     planner      -> planner.md
@@ -23,6 +28,8 @@ Usage:
     scripts/set-models.py --render             re-render from models.local.json
     scripts/set-models.py --think ...          implementer keeps its reasoning
     scripts/set-models.py --no-think ...       implementer reasoning off (default)
+    scripts/set-models.py --planner-effort L   planner reasoning budget
+                                               (none|low|medium|high; default low)
     scripts/set-models.py --force ...          allow ids not in `opencode models`
     scripts/set-models.py --no-link ...        don't touch ~/.config/opencode/agent
 """
@@ -38,6 +45,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_DIR = ROOT / "agent"
 OUT_DIR = ROOT / "agent.local"
 SELECTION = ROOT / "models.local.json"
+JEFF_CONFIG = ROOT / "jeff" / "config.local.json"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "opencode"
 LINK = CONFIG_DIR / "agent"
 
@@ -50,12 +58,49 @@ ROLE_FILES = {
 }
 ROLE_TOKENS = {role: f"__{role.upper()}_MODEL__" for role in ROLES}
 ROLE_FLAGS = {f"--{role}": role for role in ROLES}
+VALUE_FLAGS = {**ROLE_FLAGS, "--planner-effort": "planner_effort"}
 ROLE_DEFAULTS = {"orchestrator": "planner", "verifier": "planner"}
 MODEL_TOKEN = re.compile(r"__[A-Z]+_MODEL__")
 OPTIONS_MARKER = "# __IMPLEMENTER_OPTIONS__"
+PLANNER_OPTIONS_MARKER = "# __PLANNER_OPTIONS__"
+PLANNER_EFFORT_DEFAULT = "low"
 IMPLEMENTER_OPTIONS = (
     "reasoningEffort: low\nchat_template_kwargs:\n  enable_thinking: false"
 )
+
+# jeff-code role config (docs/jeff-runtime-port.md). Thinking levels are the
+# fallback; JEFF_FIRST_THINKING_ROUTER decides per turn in jeff mode.
+JEFF_ALL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"]
+JEFF_READ_TOOLS = ["read", "grep", "find", "ls"]
+JEFF_PLANNER_EFFORT = {
+    "none": "off",
+    "low": "low",
+    "medium": "medium",
+    "high": "xhigh",
+    "xhigh": "xhigh",
+}
+JEFF_ROLES = {
+    "planner": {
+        "tools": JEFF_READ_TOOLS + ["write"],
+        "guard": "planner",
+        "prompt": "planner",
+    },
+    "implementer": {
+        "tools": JEFF_ALL_TOOLS,
+        "guard": "implementer",
+        "prompt": "implementer",
+    },
+    "verifier": {
+        "tools": JEFF_ALL_TOOLS,
+        "guard": "verifier",
+        "prompt": "verifier",
+    },
+    "audit": {
+        "tools": JEFF_READ_TOOLS,
+        "guard": "audit",
+        "prompt": "verifier",
+    },
+}
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 MODEL_ID = re.compile(r"[A-Za-z0-9_.@-]+/[^\s/]+(?:/[^\s/]+)*")
@@ -152,6 +197,13 @@ def render(selection, link=True):
                 text = text.replace(OPTIONS_MARKER + "\n", "")
         elif role == "implementer":
             sys.exit(f"error: {TEMPLATE_DIR / name}: no {OPTIONS_MARKER}")
+        if PLANNER_OPTIONS_MARKER in text:
+            effort = selection.get("planner_effort") or PLANNER_EFFORT_DEFAULT
+            text = text.replace(
+                PLANNER_OPTIONS_MARKER + "\n", f"reasoningEffort: {effort}\n"
+            )
+        elif role == "planner":
+            sys.exit(f"error: {TEMPLATE_DIR / name}: no {PLANNER_OPTIONS_MARKER}")
         (OUT_DIR / name).write_text(text)
         written.append((name, roles[role]))
 
@@ -159,8 +211,47 @@ def render(selection, link=True):
     for name, model in written:
         print(f"  {name} -> {model}")
 
+    render_jeff(selection, roles)
+
     if link:
         link_config()
+
+
+def render_jeff(selection, roles):
+    effort = selection.get("planner_effort") or PLANNER_EFFORT_DEFAULT
+    thinking = {
+        "planner": JEFF_PLANNER_EFFORT.get(effort, "low"),
+        "implementer": "medium" if selection.get("implementer_think") else "off",
+        "verifier": "off",
+        "audit": "off",
+    }
+    models = {
+        "planner": roles["planner"],
+        "implementer": roles["implementer"],
+        "verifier": roles["verifier"],
+        "audit": roles["verifier"],
+    }
+    role_config = {}
+    for name, spec in JEFF_ROLES.items():
+        role_config[name] = {
+            "model": models[name],
+            "thinking": thinking[name],
+            "tools": spec["tools"],
+            "guard": spec["guard"],
+            "prompt": spec["prompt"],
+        }
+    config = {
+        "jeff_bin": os.environ.get("JEFF_BIN", "jeff"),
+        "round_cap": 5,
+        "quick_max_lines": 5,
+        "state_dir": ".ocodesa",
+        "session_dir": ".ocodesa/sessions",
+        "dispatch_timeout_ms": 60 * 60 * 1000,
+        "roles": role_config,
+    }
+    JEFF_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    JEFF_CONFIG.write_text(json.dumps(config, indent=2) + "\n")
+    print(f"rendered jeff-code config -> {JEFF_CONFIG}")
 
 
 def link_config():
@@ -179,15 +270,15 @@ def link_config():
 
 
 def parse_args(argv):
-    role_flags = {}
+    value_flags = {}
     positional = []
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg in ROLE_FLAGS:
+        if arg in VALUE_FLAGS:
             if i + 1 >= len(argv):
-                sys.exit(f"error: {arg} needs a model value")
-            role_flags[ROLE_FLAGS[arg]] = argv[i + 1]
+                sys.exit(f"error: {arg} needs a value")
+            value_flags[VALUE_FLAGS[arg]] = argv[i + 1]
             i += 2
             continue
         if arg.startswith("--"):
@@ -195,7 +286,7 @@ def parse_args(argv):
             continue
         positional.append(arg)
         i += 1
-    return role_flags, positional
+    return value_flags, positional
 
 
 def validate(selection, models, force):
@@ -211,10 +302,9 @@ def validate(selection, models, force):
 
 def main():
     args = sys.argv[1:]
-    models = list_models()
 
     if "--list" in args:
-        for i, m in enumerate(models, 1):
+        for i, m in enumerate(list_models(), 1):
             print(f"{i:>3}) {m}")
         return
 
@@ -223,18 +313,25 @@ def main():
     no_think = "--no-think" in args
     render_only = "--render" in args
     link = "--no-link" not in args
-    role_flags, positional = parse_args(args)
+    value_flags, positional = parse_args(args)
 
     if render_only:
         selection = load_selection()
         if not selection:
             sys.exit(f"error: {SELECTION} not found; run set-models.py first")
+        changed = False
+        if value_flags:
+            selection.update(value_flags)
+            changed = True
         if think or no_think:
             selection["implementer_think"] = bool(think and not no_think)
+            changed = True
+        if changed:
             save_selection(selection)
         render(selection, link=link)
         return
 
+    models = list_models()
     selection = load_selection() or {}
 
     if positional:
@@ -242,7 +339,7 @@ def main():
             sys.exit(__doc__)
         selection["planner"] = positional[0]
         selection["implementer"] = positional[1]
-    selection.update(role_flags)
+    selection.update(value_flags)
 
     if not args:
         print_models(models)
