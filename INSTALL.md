@@ -44,6 +44,28 @@ Copy `agent/*.md`, replace the model placeholders and the
 `~/.config/opencode/command/` and `plugins/*.js` plus `plugins/lib/` to
 `~/.config/opencode/plugins/`.
 
+## Keep the pipeline out of build/plan
+
+OpenCode lists every installed subagent whose `task` permission is not denied
+to the calling agent in the `task` tool description. The rendered `planner`,
+`implementer`, `verifier` and `watcher` are therefore visible to ordinary
+`build` and `plan` sessions, and a strong model may dispatch the pipeline on
+its own. Deny `task` for those four names in both agents in your global
+`opencode.jsonc` (merge with your existing `build`/`plan` blocks); OpenCode
+then drops them from the task description and the pipeline only starts via
+`/pipeline`:
+
+```jsonc
+"agent": {
+  "build": { "permission": { "task": { "*": "allow", "planner": "deny", "implementer": "deny", "verifier": "deny", "watcher": "deny" } } },
+  "plan":  { "permission": { "task": { "*": "allow", "planner": "deny", "implementer": "deny", "verifier": "deny", "watcher": "deny" } } }
+}
+```
+
+The orchestrator keeps its own allow-list, so `/pipeline` is unaffected.
+`hidden: true` on the subagents does not help: hidden agents remain invocable
+via the task tool.
+
 ## Applying model changes
 
 ```bash
