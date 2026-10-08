@@ -7,7 +7,7 @@ The repository stores placeholders (`__ORCHESTRATOR_MODEL__`,
 to gitignored `models.local.json` and rendered into gitignored `agent.local/`,
 which is symlinked into `~/.config/opencode/agent` (replacing any existing
 agent-dir symlink). Unset roles default: verifier -> planner,
-orchestrator -> planner, watcher -> verifier.
+orchestrator -> planner, watcher -> verifier, reviewer -> verifier.
 
 Roles:
     orchestrator -> orchestrator.md
@@ -15,6 +15,7 @@ Roles:
     verifier     -> verifier.md
     implementer  -> implementer.md
     watcher      -> watcher.md
+    reviewer     -> reviewer.md
 
 Usage:
     scripts/set-models.py                      interactive picker (models + thinking)
@@ -32,7 +33,7 @@ Usage:
     scripts/set-models.py --force ...          allow ids not in `opencode models`
     scripts/set-models.py --no-link ...        don't touch ~/.config/opencode/agent
 
-Defaults: planner/verifier/watcher think at medium, implementer and
+Defaults: planner/verifier/watcher/reviewer think at medium, implementer and
 orchestrator think off (effort none). Thinking off forces effort none.
 """
 
@@ -50,13 +51,14 @@ SELECTION = ROOT / "models.local.json"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "opencode"
 LINK = CONFIG_DIR / "agent"
 
-ROLES = ["orchestrator", "planner", "verifier", "implementer", "watcher"]
+ROLES = ["orchestrator", "planner", "verifier", "implementer", "watcher", "reviewer"]
 ROLE_FILES = {
     "orchestrator": "orchestrator.md",
     "planner": "planner.md",
     "verifier": "verifier.md",
     "implementer": "implementer.md",
     "watcher": "watcher.md",
+    "reviewer": "reviewer.md",
 }
 ROLE_TOKENS = {role: f"__{role.upper()}_MODEL__" for role in ROLES}
 ROLE_FLAGS = {f"--{role}": role for role in ROLES}
@@ -65,7 +67,12 @@ VALUE_FLAGS = {
     **{f"--{role}-think": f"{role}_think" for role in ROLES},
     **{f"--{role}-effort": f"{role}_effort" for role in ROLES},
 }
-ROLE_DEFAULTS = {"orchestrator": "planner", "verifier": "planner", "watcher": "verifier"}
+ROLE_DEFAULTS = {
+    "orchestrator": "planner",
+    "verifier": "planner",
+    "watcher": "verifier",
+    "reviewer": "verifier",
+}
 MODEL_TOKEN = re.compile(r"__[A-Z]+_MODEL__")
 OPTIONS_MARKERS = {role: f"# __{role.upper()}_OPTIONS__" for role in ROLES}
 EFFORTS = ("none", "low", "medium", "high", "xhigh")
@@ -75,6 +82,7 @@ THINK_DEFAULTS = {
     "implementer": False,
     "verifier": True,
     "watcher": True,
+    "reviewer": True,
 }
 EFFORT_DEFAULTS = {
     "orchestrator": "none",
@@ -82,6 +90,7 @@ EFFORT_DEFAULTS = {
     "implementer": "none",
     "verifier": "medium",
     "watcher": "medium",
+    "reviewer": "medium",
 }
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -253,6 +262,19 @@ def render(selection, link=True):
             "to enable it.",
             file=sys.stderr,
         )
+    if roles.get("reviewer") and roles.get("reviewer") == roles.get("implementer"):
+        print(
+            f"warning: reviewer model equals implementer model ({roles['implementer']}); "
+            "milestone reviews run serial (inline at each boundary), not in the "
+            "background — use --reviewer <different model> for parallel review.",
+            file=sys.stderr,
+        )
+    if roles.get("reviewer") and roles.get("reviewer") == roles.get("watcher"):
+        print(
+            f"warning: reviewer and watcher share a model ({roles['reviewer']}); "
+            "they will contend when supervision and milestone review are both active.",
+            file=sys.stderr,
+        )
     written = []
     for role in ROLES:
         name = ROLE_FILES[role]
@@ -374,13 +396,15 @@ def main():
         planner = prompt_choice("planner", models)
         implementer = prompt_choice("implementer", models)
         verifier = prompt_choice("verifier", models, default=planner)
+        watcher = prompt_choice("watcher", models, default=verifier)
         selection.update(
             {
                 "planner": planner,
                 "implementer": implementer,
                 "orchestrator": prompt_choice("orchestrator", models, default=planner),
                 "verifier": verifier,
-                "watcher": prompt_choice("watcher", models, default=verifier),
+                "watcher": watcher,
+                "reviewer": prompt_choice("reviewer", models, default=verifier),
             }
         )
         selection.update(prompt_options(selection))

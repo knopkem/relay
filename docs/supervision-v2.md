@@ -78,3 +78,6 @@ same-model guard limits supervision to `pull` (ask only).
   supervisor.
 - Threaded through `context.abort`, so cancelling the implementer cancels the
   nested watcher request.
+
+Milestone snapshots and parallel review are specified separately in
+[milestone-review.md](milestone-review.md).

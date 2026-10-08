@@ -9,8 +9,9 @@ ocodesa is a ticket-free subagent pipeline for OpenCode: `planner` writes
 tests/reviews and appends `ISSUES.md`. The orchestrator model is the router: it
 dispatches subagents through the `task` tool and follows a fixed state machine
 on their one-line protocol replies. The mailbox spec lives in
-`agent/orchestrator.md`, the watcher spec in `docs/supervision-v2.md` — read
-the relevant one before changing behavior.
+`agent/orchestrator.md`, the watcher spec in `docs/supervision-v2.md`, the
+milestone review spec in `docs/milestone-review.md` — read the relevant one
+before changing behavior.
 
 ## Layout
 
@@ -18,6 +19,9 @@ the relevant one before changing behavior.
   `# __<ROLE>_OPTIONS__` markers; never hardcode model ids.
 - `command/*.md` — slash commands (`/pipeline`).
 - `plugins/supervise.js` — `ask_supervisor`, canned advisories, prereview.
+- `plugins/milestone.js` — `milestone_done` boundary tool, frozen snapshots,
+  background or serial `reviewer` sessions, `REVIEW.md`, JIT detail jobs
+  (`OCODESA_MILESTONE=auto|off|review|serial`, `OCODESA_PLAN=full|jit`).
 - `plugins/loop-breaker.js`, `plugins/write-guard.js`,
   `plugins/serialize-task.js`, `plugins/compaction-ledger.js` — guards; keep
   their behavior intact. They act only in ocodesa agent sessions, resolved by
@@ -45,7 +49,10 @@ the relevant one before changing behavior.
   as properties (`Supervisor.__test`); never add a non-function export or the
   whole plugin silently fails to load.
 - `ask_supervisor` is gated to `context.agent === "implementer"`; keep it that
-  way.
+  way. Same for `milestone_done`.
+- Milestone review reads frozen snapshots only: the `reviewer` never edits
+  code, the gate compares providers (not model ids), and a same-provider pair
+  must never get background jobs — it downgrades to a serial boundary review.
 - Plain ESM `.js`, no build step, no new npm dependencies.
 - Preserve the agents' terse voice contract when editing prompts.
 

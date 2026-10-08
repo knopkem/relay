@@ -14,6 +14,7 @@ export const OCODESA_AGENTS = new Set([
   "implementer",
   "verifier",
   "watcher",
+  "reviewer",
 ])
 
 const MAX_SESSIONS = 256

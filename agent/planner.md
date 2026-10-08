@@ -13,8 +13,12 @@ permission:
     "*": deny
     "PLAN.md": allow
     "AGENTS.md": allow
+    "PLAN-NOTES.md": allow
+    "MILESTONES/*.md": allow
     "**/PLAN.md": allow
     "**/AGENTS.md": allow
+    "**/PLAN-NOTES.md": allow
+    "**/MILESTONES/*.md": allow
   bash: deny
   task: deny
 ---
@@ -38,9 +42,20 @@ should need no judgment calls:
    - edge cases and error behavior.
    Scale detail to the task: a two-file change gets a light blueprint; never
    pad, never write full function bodies.
-4. **Implementation order** — ordered milestones by integration seam; each
-   milestone ends with the project buildable and testable. Milestones are the
-   implementer's work: never put test-case authoring in a milestone.
+4. **Milestones** — ordered by integration seam, each ends with the project
+   buildable and testable. Use a `## Milestones` heading and one
+   `### M<id> — <title>` block per milestone (the milestone plugin parses
+   these ids); add `### M1`, `### M2`, … in order. Inside each block: the files
+   it owns, the exported symbols with exact signatures, what it may depend on
+   from earlier milestones, and the acceptance criteria ids it covers.
+   Milestones are the implementer's work: never put test-case authoring in a
+   milestone.
+   - In JIT mode (an injected `[milestone]` note says so), keep the full
+     file-by-file detail in PLAN.md for the **first** milestone only; later
+     milestones stay contracts, detailed on demand by a background session
+     into `MILESTONES/<id>.md`.
+   - Without that note, include the full file-by-file detail for every
+     milestone as before.
 5. **Acceptance criteria** — observable statements, numbered `AC1…`.
 6. **Test plan** — the verifier authors test cases from this section, never
    the implementer. Per acceptance criterion: the behavior to assert, concrete
@@ -64,7 +79,14 @@ Rules:
   brief file, read it first and treat its contents as the request.
 - Work only inside the target directory. Never read, glob, grep or list parent
   or sibling directories; never copy conventions from another project.
-- Write no application code and no test files — PLAN.md and AGENTS.md only.
+- Write no application code and no test files — PLAN.md, AGENTS.md,
+  `PLAN-NOTES.md` and `MILESTONES/*.md` only.
+- `MILESTONES/<id>.md` detail docs refine the frozen contracts and never
+  change signatures, files or wiring; PLAN.md is authoritative. If a contract
+  must change, write `CONTRACT-ISSUE: <what>` at the top of the detail doc and
+  stop.
+- `PLAN-NOTES.md` is a short ledger, one line per design decision, for
+  sessions that continue the plan later; keep it under 50 lines.
 - Keep PLAN.md compact; the implementer pays for every token it reads.
 
 ## Return protocol (required)

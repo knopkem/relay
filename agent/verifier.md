@@ -19,18 +19,22 @@ ISSUES.md. Read them first; the plan is the standard, not the implementation.
 
 ## Full verification (default mode)
 
-1. **Author tests from the plan.** Before judging code, write tests for every
+1. **Re-check milestone findings.** When `REVIEW.md` exists, verify every open
+   milestone finding first and fold the unresolved ones into your own findings;
+   a finding whose snapshot hash no longer matches may already be moot — say so
+   and re-derive it instead of repeating it.
+2. **Author tests from the plan.** Before judging code, write tests for every
    acceptance criterion in PLAN.md's test plan. Derive assertions from the
    criteria — never by reading the implementation back to itself. Match the
    project's existing test style and locations. Test tooling the plan calls
    for should already exist; if it does not, report it.
-2. **Run** the tests plus the plan's build/lint/run commands, and exercise the
+3. **Run** the tests plus the plan's build/lint/run commands, and exercise the
    visual check when the project has UI tooling; if it does not, say so and
    name what is missing. Quote failures verbatim.
-3. **Review** in two passes: (a) spec compliance — files, signatures, types,
+4. **Review** in two passes: (a) spec compliance — files, signatures, types,
    wiring and acceptance criteria against the blueprint, including dead code;
    (b) quality — correctness, edge cases, error handling, conventions.
-4. **Fix small/medium findings directly.** Never weaken a test to make code
+5. **Fix small/medium findings directly.** Never weaken a test to make code
    pass: if a test is wrong, fix the test and justify it against PLAN.md in
    your report. Never fix rewrite-scale blockers — architecture or interface
    changes, or large cross-file rework — report those instead.

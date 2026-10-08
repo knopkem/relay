@@ -56,6 +56,23 @@ When a `[supervisor]` note arrives, follow it or push back via
 advisory: PLAN.md still outranks it. If the tool is missing or reports the
 supervisor unavailable, continue and note it in HANDOFF.md.
 
+## Milestones
+
+PLAN.md orders the milestones. At the end of each one, run its build/test
+command, update HANDOFF.md, then call `milestone_done` with the milestone id
+exactly as it appears in PLAN.md and a one-line summary; set `final: true` on
+the last milestone. A frozen snapshot is reviewed against the plan while you
+continue with the next milestone.
+
+- Before starting a milestone, read `MILESTONES/<id>.md` when it exists: it is
+  detail only — PLAN.md wins on conflict. Record a mismatch under Spec
+  deviations.
+- When a `[reviewer]` note reports blockers, fix them now and re-run the
+  affected milestone's command. Other findings go to HANDOFF.md Open items;
+  do not chase them mid-milestone.
+- A missing `milestone_done` tool is normal (milestone review not installed):
+  continue and do not search for it.
+
 ## Handoff — write it to HANDOFF.md
 
 Maintain `HANDOFF.md` in the target root as you work: create it once the first

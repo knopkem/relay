@@ -84,15 +84,17 @@ and task ids — never `PLAN.md`, `HANDOFF.md` or `ISSUES.md`.
 | `implementer` | subagent | fast | Fills in the entire blueprint in one session, writes `HANDOFF.md`. Never redesigns interfaces, never writes tests, never uses git. Resumed for fixes (`ISSUES.md`); replies `IMPL: ok` / `BLOCKED`. |
 | `verifier` | subagent | = planner | Fresh session: tests from the plan first, then spec/quality review, then fixes small/medium findings itself, appending everything to `ISSUES.md`. Re-check, audit (read-only) and fix modes. Replies `VERIFY` / `AUDIT` / `FIXED`. |
 | `watcher` | subagent | = verifier | Read-only supervisor for the running implementer. Answers `ask_supervisor` with ≤2 sentences of direction, and powers the passive advisories. Never edits. |
+| `reviewer` | subagent | = verifier | Read-only milestone reviewer. Inspects a frozen snapshot of one completed milestone against `PLAN.md`, reports findings to `REVIEW.md`; never edits. Invoked by the milestone plugin. |
 
 All prompts end with the same terse voice contract.
 
 ## Features
 
 All guards below run only in the pipeline's own agent roles (`orchestrator`,
-`planner`, `implementer`, `verifier`, `watcher`); ordinary `build`/`plan`
-sessions never see them. The supervisor is narrower still: it only ever acts
-for the `implementer`. Scoping lives in `plugins/lib/agent-gate.js`.
+`planner`, `implementer`, `verifier`, `watcher`, `reviewer`); ordinary
+`build`/`plan` sessions never see them. The supervisor is narrower still: it
+only ever acts for the `implementer`. Scoping lives in
+`plugins/lib/agent-gate.js`.
 
 ### Parallel supervision — `plugins/supervise.js`
 
@@ -111,6 +113,24 @@ Modes: `OCODESA_SUPERVISE=off` (disable), `advisory` (canned nudges only),
 `.ocodesa/supervise.jsonl`. Notes arrive in the implementer session as
 `[supervisor] …` synthetic parts. Details:
 [docs/supervision-v2.md](docs/supervision-v2.md).
+
+### Milestone review — `plugins/milestone.js`
+
+The implementer calls `milestone_done` at each milestone boundary; the plugin
+freezes the files changed since the last boundary into `.ocodesa/review/M<id>/`
+with a sha256 manifest, and a fresh read-only `reviewer` inspects that snapshot
+against `PLAN.md` — never the live tree, which keeps changing. Findings land in
+`REVIEW.md`; blockers are injected into the implementer's next step as
+`[reviewer] …`, the rest are summarized at the next boundary and re-checked by
+the final verifier.
+
+Modes: `OCODESA_MILESTONE=auto` (default; background reviews when the reviewer
+has a different provider, otherwise serial inline reviews), `review`, `serial`
+(one-LLM setups), `off`. `OCODESA_MILESTONE_DEBUG=1` logs to
+`.ocodesa/milestone.jsonl`. With `OCODESA_PLAN=jit` and a separate planner
+provider, PLAN.md keeps machine-readable milestone contracts and a background
+planner session writes advisory `MILESTONES/<id>.md` detail while the
+implementer works. Details: [docs/milestone-review.md](docs/milestone-review.md).
 
 ### Loop breaker — `plugins/loop-breaker.js`
 
@@ -139,18 +159,19 @@ free.
 
 ### Compaction ledger — `plugins/compaction-ledger.js`
 
-Injects the existing `PLAN.md` / `AGENTS.md` / `HANDOFF.md` / `ISSUES.md` into
-compaction prompts so long sessions re-read their durable memory instead of a
-lossy summary.
+Injects the existing `PLAN.md` / `AGENTS.md` / `HANDOFF.md` / `ISSUES.md` /
+`REVIEW.md` into compaction prompts so long sessions re-read their durable
+memory instead of a lossy summary.
 
 ## Models
 
 Agent files carry placeholders (`__ORCHESTRATOR_MODEL__`, `__PLANNER_MODEL__`,
-`__VERIFIER_MODEL__`, `__IMPLEMENTER_MODEL__`, `# __<ROLE>_OPTIONS__`);
-`scripts/set-models.py` resolves them from gitignored `models.local.json` into
-gitignored `agent.local/` and links it into `~/.config/opencode/agent`.
-Defaults: verifier → planner, orchestrator → planner, watcher → verifier;
-planner/verifier/watcher think at effort `medium`, implementer and
+`__VERIFIER_MODEL__`, `__IMPLEMENTER_MODEL__`, `__REVIEWER_MODEL__`,
+`# __<ROLE>_OPTIONS__`); `scripts/set-models.py` resolves them from gitignored
+`models.local.json` into gitignored `agent.local/` and links it into
+`~/.config/opencode/agent`. Defaults: verifier → planner, orchestrator →
+planner, watcher → verifier, reviewer → verifier;
+planner/verifier/watcher/reviewer think at effort `medium`, implementer and
 orchestrator think off (`reasoningEffort: none`, `enable_thinking: false`).
 
 ```bash
@@ -189,10 +210,11 @@ python3 scripts/set-models.py --render --no-link   # re-render from models.local
 grep -R "__.*_MODEL__\|_OPTIONS__\|__IF" agent.local   # must print nothing
 ```
 
-`node --test` covers supervision, the guards and the ledger, all with mock
-clients — no models or network. Manual end-to-end: in a scratch dir, run
-`opencode`, then `/pipeline <task>`, and inspect `PLAN.md`, `HANDOFF.md` and
-`ISSUES.md`.
+`node --test` covers supervision, milestone review, the guards and the ledger,
+all with mock clients — no models or network. Manual end-to-end: in a scratch
+dir, run `opencode`, then `/pipeline <task>`, and inspect `PLAN.md`,
+`HANDOFF.md`, `ISSUES.md` and (for milestone review) `.ocodesa/review/` plus
+`REVIEW.md`.
 
 ## Design notes
 
@@ -227,3 +249,9 @@ clients — no models or network. Manual end-to-end: in a scratch dir, run
   nudge. When the watcher model equals the implementer's, supervision drops
   to `pull`: `ask_supervisor` stays (fresh context still helps), escalation
   and prereview are off.
+- **Snapshot reviews, not live reviews.** Milestone review inspects a frozen,
+  hashed copy of the milestone's files, so findings never race the
+  implementer's next edits; blockers are pushed immediately, everything else
+  is batched at the next boundary and re-checked by the final verifier. On a
+  single-provider setup there is no idle capacity, so `auto` downgrades to a
+  serial inline review at the boundary instead of thrashing the builder.

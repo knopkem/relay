@@ -11,7 +11,7 @@ import path from "node:path"
 
 import { isOcodesaSession, withAgentTracking } from "./lib/agent-gate.js"
 
-const LEDGER_FILES = ["TASK.md", "PLAN.md", "AGENTS.md", "HANDOFF.md", "ISSUES.md"]
+const LEDGER_FILES = ["TASK.md", "PLAN.md", "AGENTS.md", "HANDOFF.md", "ISSUES.md", "REVIEW.md"]
 
 export const CompactionLedger = async ({ directory }) =>
   withAgentTracking({
