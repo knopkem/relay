@@ -28,8 +28,13 @@
 //     told to run the project's checks, and only the role that owns a report
 //     file is told to update it;
 //   - the abort ratchet and the session lock apply only to roles that can
-//     run commands (RATCHET_AGENTS); read-only roles are blocked call by
-//     call but never locked mid-write.
+//     run commands (RATCHET_AGENTS) and only to write-like actions; a
+//     read-only repeat (read, grep, glob, cat, …) is rejected like any other
+//     repeat but never ratchets, so a blocked inspection can never lock the
+//     session by itself;
+//   - a fingerprint aborts at most once per session: retrying a blocked call
+//     stays blocked forever but never counts as a new abort, so a stubborn
+//     model on one command cannot walk the session into the lock.
 
 import { agentFor, forgetAgent, isOcodesaSession, withAgentTracking } from "./lib/agent-gate.js"
 
@@ -39,9 +44,26 @@ const EDIT_RUN_LIMIT = 5
 const TRIP_LIMIT = 5
 const MAX_SESSIONS = 64
 const MAX_RESULTS = 32
+const MAX_COUNTED = 256
 
 // Roles whose permission config allows bash; only they ratchet toward the lock.
 const RATCHET_AGENTS = new Set(["implementer", "verifier", "orchestrator"])
+
+// Read-only calls are blocked like any other repeat but never ratchet toward
+// the lock: an inspection loop must not be able to end the run.
+const READ_ONLY_TOOLS = new Set(["read", "grep", "glob", "list", "webfetch"])
+const READ_ONLY_COMMANDS =
+  /^\s*(?:grep|rg|ag|cat|bat|head|tail|nl|tac|ls|find|file|stat|wc|diff|jq|tree|du|df|which|pwd|echo|env|printenv|realpath|readlink|basename|dirname|git\s+(?:status|log|diff|show|branch|remote|describe|rev-parse))\b/
+const MUTATING_COMMAND =
+  /[<>]|\|\s*tee\b|\b(?:rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|install|dd|truncate|patch|tee)\b|\bsed\b[^\n]*\s-[a-z]*i|\bfind\b[^\n]*\s-(?:delete|exec|execdir|ok|okdir)\b|[;&]/
+
+function isReadOnly(tool, args = {}) {
+  if (READ_ONLY_TOOLS.has(tool)) return true
+  if (tool !== "bash") return false
+  const command = String(args.command ?? "")
+  if (!READ_ONLY_COMMANDS.test(command)) return false
+  return !MUTATING_COMMAND.test(command)
+}
 
 const RECOVERY = {
   implementer: 'If you are stuck, update HANDOFF.md and reply "BLOCKED: <reason>".',
@@ -75,6 +97,7 @@ function stateFor(sessionID) {
       lastFile: "",
       editRun: 0,
       blocked: new Set(),
+      counted: new Set(),
       trips: 0,
       locked: false,
       aborted: false,
@@ -161,13 +184,20 @@ function fingerprintOf(tool, args) {
 }
 
 // Record an abort and return the error to throw. The aborted fingerprint is
-// remembered so an immediate retry is rejected too. Once a ratcheted session
-// reaches TRIP_LIMIT aborts it is locked and the message tells the model how
-// to end. Roles without shell access cannot satisfy the guard's remedy, so
-// they are blocked call by call but never ratcheted or locked.
-function trip(state, fingerprint, message, agent) {
+// remembered so an immediate retry is rejected too. A fingerprint counts as
+// one abort per session, and read-only calls never count, so hammering the
+// same command stays blocked but cannot walk the session into the lock. Once
+// a ratcheted session reaches TRIP_LIMIT aborts it is locked and the message
+// tells the model how to end. Roles without shell access cannot satisfy the
+// guard's remedy, so they are blocked call by call but never locked.
+function trip(state, fingerprint, message, agent, { ratchet = true } = {}) {
   state.blocked.add(fingerprint)
-  if (!RATCHET_AGENTS.has(agent)) return new Error(message)
+  if (!ratchet || !RATCHET_AGENTS.has(agent)) return new Error(message)
+  if (state.counted.has(fingerprint)) return new Error(message)
+  state.counted.add(fingerprint)
+  if (state.counted.size > MAX_COUNTED) {
+    state.counted.delete(state.counted.keys().next().value)
+  }
   state.trips += 1
   if (state.trips < TRIP_LIMIT) return new Error(message)
   state.locked = true
@@ -196,6 +226,7 @@ export const LoopBreaker = async ({ client } = {}) => {
       const state = stateFor(sessionID)
       const fp = fingerprintOf(tool, args)
       const isEdit = tool === "edit" || tool === "write"
+      const ratchet = !isReadOnly(tool, args)
 
       if (state.locked) {
         if (!state.aborted) {
@@ -213,6 +244,7 @@ export const LoopBreaker = async ({ client } = {}) => {
           fp,
           `Loop breaker: "${labelFor(tool, args)}" was just blocked and is being repeated. Take a different step. ${recoveryHint(agent)}`,
           agent,
+          { ratchet },
         )
       }
 
@@ -234,6 +266,7 @@ export const LoopBreaker = async ({ client } = {}) => {
           fp,
           `Loop breaker: "${labelFor(tool, args)}" ran ${state.sameRun} times in a row with no change. Stop repeating it — read the output, change the approach. ${recoveryHint(agent)}`,
           agent,
+          { ratchet },
         )
       }
       if (isEdit && state.editRun >= EDIT_RUN_LIMIT) {
@@ -242,6 +275,7 @@ export const LoopBreaker = async ({ client } = {}) => {
           fp,
           `Loop breaker: ${state.editRun} consecutive edits to ${state.lastFile || "one file"} without another action in between. ${editRunHint(agent)} ${recoveryHint(agent)}`,
           agent,
+          { ratchet },
         )
       }
       const seen = state.results.get(fp)
@@ -251,6 +285,7 @@ export const LoopBreaker = async ({ client } = {}) => {
           fp,
           `Loop breaker: "${labelFor(tool, args)}" produced identical output ${seen.repeats} times — retrying will not change the result. Change the approach. ${recoveryHint(agent)}`,
           agent,
+          { ratchet },
         )
       }
 

@@ -92,6 +92,31 @@ test("loop breaker: a blocked call is rejected immediately when repeated", async
   await before(plugin, input, args)
 })
 
+test("loop breaker: retrying one blocked fingerprint never locks the session", async () => {
+  const plugin = await LoopBreaker()
+  const input = { tool: "bash", sessionID: "lb_reblock" }
+  const args = { command: "npm test" }
+  await before(plugin, input, args)
+  await before(plugin, input, args)
+  await assert.rejects(() => before(plugin, input, args), /ran 3 times/)
+  for (let i = 0; i < LoopBreaker.__test.TRIP_LIMIT + 3; i += 1) {
+    await assert.rejects(() => before(plugin, input, args), /was just blocked/)
+  }
+  await before(plugin, { tool: "bash", sessionID: "lb_reblock" }, { command: "fresh-idea" })
+})
+
+test("loop breaker: read-only commands are blocked but never ratchet toward the lock", async () => {
+  const plugin = await LoopBreaker()
+  const input = { tool: "bash", sessionID: "lb_readonly" }
+  for (let i = 0; i < LoopBreaker.__test.TRIP_LIMIT + 2; i += 1) {
+    const args = { command: `grep -n "pub fn from_config${i}" src/lib.rs` }
+    await before(plugin, input, args)
+    await before(plugin, input, args)
+    await assert.rejects(() => before(plugin, input, args), /ran 3 times/)
+  }
+  await before(plugin, { tool: "bash", sessionID: "lb_readonly" }, { command: "fresh-idea" })
+})
+
 test("loop breaker: the implementer edit-run abort asks for checks and HANDOFF.md", async () => {
   const plugin = await LoopBreaker()
   const input = { tool: "edit", sessionID: "lb_impl_edit" }
