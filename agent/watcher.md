@@ -5,9 +5,7 @@ description: >-
   changes the plan. Invoked by the supervise plugin.
 mode: subagent
 model: __WATCHER_MODEL__
-reasoningEffort: none
-chat_template_kwargs:
-  enable_thinking: false
+# __WATCHER_OPTIONS__
 temperature: 0.1
 permission:
   read: allow

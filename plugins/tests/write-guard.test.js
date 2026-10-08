@@ -4,12 +4,14 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { WriteGuard } from "../write-guard.js"
+import { rememberAgent } from "../lib/agent-gate.js"
 
 const makeDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "write-guard-"))
 
-const before = async (plugin, command) => {
+const before = async (plugin, command, sessionID = "wg") => {
   const args = { command }
-  await plugin["tool.execute.before"]({ tool: "bash", sessionID: "wg" }, { args })
+  rememberAgent(sessionID, "implementer")
+  await plugin["tool.execute.before"]({ tool: "bash", sessionID }, { args })
   return args
 }
 
@@ -109,4 +111,15 @@ test("write guard: OCODESA_WRITE_GUARD=off disables the hooks", async () => {
     if (previous === undefined) delete process.env.OCODESA_WRITE_GUARD
     else process.env.OCODESA_WRITE_GUARD = previous
   }
+})
+
+test("write guard: non-ocodesa sessions are left untouched", async () => {
+  const dir = makeDir()
+  const plugin = await WriteGuard({ directory: dir })
+  const command = "cat > src/a.txt <<'EOF'\nhello\nEOF"
+  const args = { command }
+  rememberAgent("wg_build", "build")
+  await plugin["tool.execute.before"]({ tool: "bash", sessionID: "wg_build" }, { args })
+  assert.equal(args.command, command)
+  assert.equal(fs.existsSync(path.join(dir, "src/a.txt")), false)
 })

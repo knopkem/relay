@@ -18,6 +18,8 @@
 import fs from "node:fs"
 import path from "node:path"
 
+import { isOcodesaSession, withAgentTracking } from "./lib/agent-gate.js"
+
 const INTERPRETER_COMMAND = /^\s*(?:env\s+)?(?:python[0-9.]*|node|perl|ruby|php)\b/
 const SCRIPT_WRITER =
   /open\s*\([^)]*['"][wa]\+?['"]|\.write_text\s*\(|\.write_bytes\s*\(|writeFileSync\s*\(|appendFileSync\s*\(|os\.(?:write|pwrite|remove|unlink|rename|replace|makedirs?)\s*\(|shutil\.|pathlib/
@@ -112,8 +114,9 @@ function planWrite(command, directory) {
 export const WriteGuard = async ({ directory } = {}) => {
   if (String(process.env.OCODESA_WRITE_GUARD ?? "").toLowerCase() === "off") return {}
 
-  return {
+  return withAgentTracking({
     "tool.execute.before": async (input, output) => {
+      if (!isOcodesaSession(input?.sessionID)) return
       if (input?.tool !== "bash") return
       const args = output?.args
       if (!args || typeof args.command !== "string") return
@@ -138,7 +141,7 @@ export const WriteGuard = async ({ directory } = {}) => {
         `write guard: wrote ${where} (${bytes} bytes) via the write tool. Do not use bash to write files.`,
       )}`
     },
-  }
+  })
 }
 
 WriteGuard.__test = { planWrite, planHeredoc, resolveTarget, shellQuote }

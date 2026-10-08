@@ -5,6 +5,7 @@ description: >-
   reads artifacts, never edits.
 mode: primary
 model: __ORCHESTRATOR_MODEL__
+# __ORCHESTRATOR_OPTIONS__
 temperature: 0.1
 permission:
   read: allow
@@ -80,21 +81,22 @@ P planner:
 ```
 ## Target: <T>
 ## Goal: <the user's request, quoted verbatim>
-Write PLAN.md.
+Write PLAN.md and, if the project has no AGENTS.md, a short AGENTS.md.
 ```
 
 P2 planner, empty request — brief lives in `TASK.md`:
 ```
 ## Target: <T>
 ## Brief: <T>/TASK.md
-Read the brief file first. Write PLAN.md.
+Read the brief file first. Write PLAN.md and, if the project has no AGENTS.md,
+a short AGENTS.md.
 ```
 
 I implement:
 ```
 ## Target: <T>
 ## Plan: <T>/PLAN.md
-Read AGENTS.md too. Implement the entire plan in one go.
+Read AGENTS.md if it exists. Implement the entire plan in one go.
 ```
 
 V verify:
@@ -138,26 +140,34 @@ Fix only the audit findings in the latest section; keep test changes justified.
 K planner:
 ```
 ## Target: <T>
-Your previous reply was interrupted or contained no protocol line. Read
-PLAN.md and bring it up to date, then reply with exactly one line:
-PLAN: ok
+Your previous reply was interrupted or contained no protocol line. If PLAN.md
+already covers the whole request and AGENTS.md exists, reply with exactly one
+line: PLAN: ok — make no tool calls. Otherwise, if the loop breaker aborted
+the last run, do not repeat the action its error named; change the approach.
+Read PLAN.md, bring it up to date (write AGENTS.md if the project has none),
+then reply with exactly one line: PLAN: ok
 ```
 
 K implementer (I and fix rounds):
 ```
 ## Target: <T>
-Your previous reply was interrupted or contained no protocol line. Read
-HANDOFF.md if it exists, continue the plan and keep HANDOFF.md updated, run
-the plan's build/test commands, then reply with exactly one line:
-IMPL: ok
+Your previous reply was interrupted or contained no protocol line. If
+HANDOFF.md shows the plan's milestones complete and the last build/test
+command passed, reply with exactly one line: IMPL: ok — make no tool calls.
+Otherwise, if the loop breaker aborted the last run, do not repeat the action
+its error named; change the approach. Read HANDOFF.md if it exists, continue
+the plan, keep HANDOFF.md updated, run the plan's build/test commands, then
+reply with exactly one line: IMPL: ok
 ```
 
 K verifier (V, R, audit A, polish P2 — fill the expected line for the phase:
 `VERIFY: pass changed=app|tests|none`, `AUDIT: pass`, or `FIXED: ok`):
 ```
 ## Target: <T>
-Your previous reply was interrupted or contained no protocol line. Finish the
-review, write the ISSUES.md section, then reply with exactly one line:
+Your previous reply was interrupted or contained no protocol line. If the loop
+breaker aborted the last run, do not repeat the action its error named; change
+the approach. Finish the review, write the ISSUES.md section, then reply with
+exactly one line:
 <expected line>
 ```
 
@@ -170,6 +180,11 @@ review, write the ISSUES.md section, then reply with exactly one line:
 - Planner, verifier and audit always run fresh (never pass a `task_id`); only
   the implementer and the polisher verifier are resumed, per the state
   machine.
+- A resumed session must be the same child that was interrupted; never reuse
+  another phase's `task_id`. If the aborted child returned no `task_id`,
+  dispatch that phase fresh and add this line to the brief: `The last run was
+  aborted by the loop breaker; do not repeat the blocked action — change the
+  approach.`
 - You never create or edit files, with `edit` or with `bash` redirection; bash
   is for checking state only. If a tool call errors or is aborted by the loop
   breaker, stop and report — never retry it.

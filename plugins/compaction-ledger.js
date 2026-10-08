@@ -9,25 +9,29 @@
 import fs from "node:fs"
 import path from "node:path"
 
+import { isOcodesaSession, withAgentTracking } from "./lib/agent-gate.js"
+
 const LEDGER_FILES = ["TASK.md", "PLAN.md", "AGENTS.md", "HANDOFF.md", "ISSUES.md"]
 
-export const CompactionLedger = async ({ directory }) => ({
-  "experimental.session.compacting": async (input, output) => {
-    const present = LEDGER_FILES.filter((name) =>
-      fs.existsSync(path.join(directory, name)),
-    )
-    if (!present.length) return
-    output.context.push(
-      [
-        "## Project memory survives in files",
-        "Treat these files as the source of truth over this summary; re-read them before continuing:",
-        ...present.map((name) => `- ${name}`),
-        "",
-        "Preserve in the summary: the current milestone of the plan, every file",
-        "created or modified, exact exported symbol names and who imports or",
-        "mounts them, what is implemented but not yet wired, the latest handoff",
-        "state, the verifier's open findings, and any command still failing.",
-      ].join("\n"),
-    )
-  },
-})
+export const CompactionLedger = async ({ directory }) =>
+  withAgentTracking({
+    "experimental.session.compacting": async (input, output) => {
+      if (!isOcodesaSession(input?.sessionID)) return
+      const present = LEDGER_FILES.filter((name) =>
+        fs.existsSync(path.join(directory, name)),
+      )
+      if (!present.length) return
+      output.context.push(
+        [
+          "## Project memory survives in files",
+          "Treat these files as the source of truth over this summary; re-read them before continuing:",
+          ...present.map((name) => `- ${name}`),
+          "",
+          "Preserve in the summary: the current milestone of the plan, every file",
+          "created or modified, exact exported symbol names and who imports or",
+          "mounts them, what is implemented but not yet wired, the latest handoff",
+          "state, the verifier's open findings, and any command still failing.",
+        ].join("\n"),
+      )
+    },
+  })

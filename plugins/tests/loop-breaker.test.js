@@ -1,9 +1,19 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { LoopBreaker } from "../loop-breaker.js"
+import { rememberAgent } from "../lib/agent-gate.js"
 
-const before = (plugin, input, args = {}) =>
-  plugin["tool.execute.before"](input, { args })
+const prime = (sessionID) => rememberAgent(sessionID, "implementer")
+
+const before = (plugin, input, args = {}) => {
+  prime(input.sessionID)
+  return plugin["tool.execute.before"](input, { args })
+}
+
+const after = (plugin, input, output) => {
+  prime(input.sessionID)
+  return plugin["tool.execute.after"](input, output)
+}
 
 test("loop breaker: same action three times in a row throws", async () => {
   const plugin = await LoopBreaker()
@@ -39,14 +49,126 @@ test("loop breaker: five consecutive edits to one file throw until a command run
   await before(plugin, input, { filePath: "src/a.ts", content: "v6" })
 })
 
+test("loop breaker: a read resets the edit run and is never blocked by it", async () => {
+  const plugin = await LoopBreaker()
+  const input = { tool: "edit", sessionID: "lb_edit_read" }
+  for (let i = 0; i < 4; i += 1) {
+    await before(plugin, input, { filePath: "src/a.ts", content: `v${i}` })
+  }
+  await assert.rejects(
+    () => before(plugin, input, { filePath: "src/a.ts", content: "v5" }),
+    /5 consecutive edits/,
+  )
+  await before(
+    plugin,
+    { tool: "read", sessionID: "lb_edit_read" },
+    { filePath: "src/a.ts" },
+  )
+  await before(plugin, input, { filePath: "src/a.ts", content: "v6" })
+})
+
+test("loop breaker: reads between edits keep the edit run from tripping", async () => {
+  const plugin = await LoopBreaker()
+  const input = { tool: "edit", sessionID: "lb_edit_interleave" }
+  for (let i = 0; i < 12; i += 1) {
+    await before(plugin, input, { filePath: "PLAN.md", content: `v${i}` })
+    await before(
+      plugin,
+      { tool: "read", sessionID: "lb_edit_interleave" },
+      { filePath: "PLAN.md" },
+    )
+  }
+})
+
+test("loop breaker: a blocked call is rejected immediately when repeated", async () => {
+  const plugin = await LoopBreaker()
+  const input = { tool: "bash", sessionID: "lb_blocked_repeat" }
+  const args = { command: "npm test" }
+  await before(plugin, input, args)
+  await before(plugin, input, args)
+  await assert.rejects(() => before(plugin, input, args), /ran 3 times/)
+  await assert.rejects(() => before(plugin, input, args), /was just blocked/)
+  await before(plugin, { tool: "bash", sessionID: "lb_blocked_repeat" }, { command: "fresh" })
+  await before(plugin, input, args)
+})
+
+test("loop breaker: the implementer edit-run abort asks for checks and HANDOFF.md", async () => {
+  const plugin = await LoopBreaker()
+  const input = { tool: "edit", sessionID: "lb_impl_edit" }
+  for (let i = 0; i < 4; i += 1) {
+    await before(plugin, input, { filePath: "src/a.ts", content: `v${i}` })
+  }
+  await assert.rejects(
+    () => before(plugin, input, { filePath: "src/a.ts", content: "v5" }),
+    (error) => {
+      assert.match(error.message, /typecheck/)
+      assert.match(error.message, /HANDOFF\.md/)
+      return true
+    },
+  )
+})
+
+test("loop breaker: the planner edit-run abort asks for one whole-file write", async () => {
+  const plugin = await LoopBreaker()
+  rememberAgent("lb_planner_edit", "planner")
+  const input = { tool: "edit", sessionID: "lb_planner_edit" }
+  for (let i = 0; i < 4; i += 1) {
+    await plugin["tool.execute.before"](input, {
+      args: { filePath: "PLAN.md", oldString: `s${i}`, newString: `t${i}` },
+    })
+  }
+  await assert.rejects(
+    () =>
+      plugin["tool.execute.before"](input, {
+        args: { filePath: "PLAN.md", oldString: "s5", newString: "t5" },
+      }),
+    (error) => {
+      assert.match(error.message, /whole-file write/)
+      assert.match(error.message, /PLAN-FAIL/)
+      assert.doesNotMatch(error.message, /typecheck/)
+      return true
+    },
+  )
+})
+
+test("loop breaker: the planner is never locked and never aborts the session", async () => {
+  const aborts = []
+  const plugin = await LoopBreaker({
+    client: {
+      session: {
+        abort: async (options) => {
+          aborts.push(options)
+        },
+      },
+    },
+  })
+  rememberAgent("lb_planner", "planner")
+  const input = { tool: "bash", sessionID: "lb_planner" }
+  for (let i = 0; i < LoopBreaker.__test.TRIP_LIMIT + 2; i += 1) {
+    const args = { command: `distinct-action-${i}` }
+    await plugin["tool.execute.before"](input, { args })
+    await plugin["tool.execute.before"](input, { args })
+    await assert.rejects(
+      () => plugin["tool.execute.before"](input, { args }),
+      (error) => {
+        assert.match(error.message, /PLAN-FAIL/)
+        assert.doesNotMatch(error.message, /locked/)
+        return true
+      },
+    )
+  }
+  await plugin["tool.execute.before"](input, { args: { command: "fresh-idea" } })
+  assert.equal(aborts.length, 0)
+})
+
 test("loop breaker: identical output three times aborts the next retry", async () => {
   const plugin = await LoopBreaker()
   const input = { tool: "bash", sessionID: "lb_result" }
   const args = { command: "cat missing.txt" }
   const output = { args, output: "ENOENT\n" }
-  await plugin["tool.execute.after"](input, output)
-  await plugin["tool.execute.after"](input, output)
-  await plugin["tool.execute.after"](input, output)
+  await after(plugin, input, output)
+  await after(plugin, input, output)
+  await after(plugin, input, output)
   await assert.rejects(() => before(plugin, input, args), /identical output 3 times/)
 })
 
@@ -123,7 +245,7 @@ test("loop breaker: volatile tokens and reordered lines count as identical outpu
     "finished in 0.03s\nthread 'a' (333) panicked at src/r.rs:1\n  y\nfailures:\n  x\n",
   ]
   for (const output of outputs) {
-    await plugin["tool.execute.after"](input, { args, output })
+    await after(plugin, input, { args, output })
   }
   await assert.rejects(() => before(plugin, input, args), /identical output 3 times/)
 })
@@ -136,10 +258,21 @@ test("loop breaker: same replace target variants share a fingerprint", async () 
     needle: "fn test_rock_falls\\(\\) \\{.*?\\n    \\}",
   }
   for (const repl of ["one", "two", "three"]) {
-    await plugin["tool.execute.after"](input, { args: { ...base, repl }, output: "OK" })
+    await after(plugin, input, { args: { ...base, repl }, output: "OK" })
   }
   await assert.rejects(
     () => before(plugin, input, { ...base, repl: "four" }),
     /identical output 3 times/,
   )
+})
+
+test("loop breaker: non-ocodesa sessions are never guarded", async () => {
+  const plugin = await LoopBreaker()
+  const input = { tool: "bash", sessionID: "lb_build" }
+  rememberAgent("lb_build", "build")
+  const args = { command: "npm test" }
+  await plugin["tool.execute.before"](input, { args })
+  await plugin["tool.execute.before"](input, { args })
+  await plugin["tool.execute.before"](input, { args })
+  await plugin["tool.execute.before"](input, { args })
 })

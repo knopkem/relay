@@ -89,6 +89,11 @@ All prompts end with the same terse voice contract.
 
 ## Features
 
+All guards below run only in the pipeline's own agent roles (`orchestrator`,
+`planner`, `implementer`, `verifier`, `watcher`); ordinary `build`/`plan`
+sessions never see them. The supervisor is narrower still: it only ever acts
+for the `implementer`. Scoping lives in `plugins/lib/agent-gate.js`.
+
 ### Parallel supervision — `plugins/supervise.js`
 
 A read-only `watcher` on the good model steers the fast implementer mid-task:
@@ -101,7 +106,8 @@ A read-only `watcher` on the good model steers the fast implementer mid-task:
   background; the note is injected only if still fresh.
 
 Modes: `OCODESA_SUPERVISE=off` (disable), `advisory` (canned nudges only),
-`full` (default). `OCODESA_SUPERVISE_DEBUG=1` logs every event to
+`pull` (ask only, no escalation or prereview), `full` (default).
+`OCODESA_SUPERVISE_DEBUG=1` logs every event to
 `.ocodesa/supervise.jsonl`. Notes arrive in the implementer session as
 `[supervisor] …` synthetic parts. Details:
 [docs/supervision-v2.md](docs/supervision-v2.md).
@@ -140,18 +146,19 @@ lossy summary.
 ## Models
 
 Agent files carry placeholders (`__ORCHESTRATOR_MODEL__`, `__PLANNER_MODEL__`,
-`__VERIFIER_MODEL__`, `__IMPLEMENTER_MODEL__`, `# __IMPLEMENTER_OPTIONS__`,
-`# __PLANNER_OPTIONS__`); `scripts/set-models.py` resolves them from
-gitignored `models.local.json` into gitignored `agent.local/` and links it into
-`~/.config/opencode/agent`. Defaults: verifier → planner, orchestrator →
-planner, watcher → verifier, planner reasoning → `low`.
+`__VERIFIER_MODEL__`, `__IMPLEMENTER_MODEL__`, `# __<ROLE>_OPTIONS__`);
+`scripts/set-models.py` resolves them from gitignored `models.local.json` into
+gitignored `agent.local/` and links it into `~/.config/opencode/agent`.
+Defaults: verifier → planner, orchestrator → planner, watcher → verifier;
+planner/verifier/watcher think at effort `medium`, implementer and
+orchestrator think off (`reasoningEffort: none`, `enable_thinking: false`).
 
 ```bash
-python3 scripts/set-models.py                   # interactive picker
+python3 scripts/set-models.py                   # interactive picker (models + thinking)
 python3 scripts/set-models.py --orchestrator M  # change one role, re-render
 python3 scripts/set-models.py --render          # after editing models.local.json
-python3 scripts/set-models.py --think           # implementer keeps reasoning
-python3 scripts/set-models.py --planner-effort none  # planner reasoning level
+python3 scripts/set-models.py --implementer-think on   # per-role thinking
+python3 scripts/set-models.py --planner-effort high    # per-role effort
 ```
 
 The orchestrator only routes on one-line protocol replies, so any model that
@@ -179,7 +186,7 @@ python3 -m py_compile scripts/set-models.py
 node --check plugins/*.js
 node --test plugins/tests/*.test.js
 python3 scripts/set-models.py --render --no-link   # re-render from models.local.json
-grep -R "__.*_MODEL__\|__IF" agent.local           # must print nothing
+grep -R "__.*_MODEL__\|_OPTIONS__\|__IF" agent.local   # must print nothing
 ```
 
 `node --test` covers supervision, the guards and the ledger, all with mock
@@ -218,4 +225,5 @@ clients — no models or network. Manual end-to-end: in a scratch dir, run
   watcher escalation when a trigger fires, and an async prereview. A
   loop-breaker abort also queues a "write HANDOFF.md, then reply BLOCKED"
   nudge. When the watcher model equals the implementer's, supervision drops
-  to advisory-only and `ask_supervisor` is hidden.
+  to `pull`: `ask_supervisor` stays (fresh context still helps), escalation
+  and prereview are off.

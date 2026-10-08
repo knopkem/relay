@@ -4,6 +4,9 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { OneTaskPerModel } from "../serialize-task.js"
+import { rememberAgent } from "../lib/agent-gate.js"
+
+const asOrchestrator = () => rememberAgent("ses_serial", "orchestrator")
 
 function configDir(agents) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ocodesa-serialize-"))
@@ -34,6 +37,7 @@ const taskCall = (agent, callID) => [
 test("serialize-task: the same agent and provider serve one task at a time", async () => {
   await withConfig(configDir({ builder: "provA" }), async () => {
     const plugin = await OneTaskPerModel()
+    asOrchestrator()
     await plugin["tool.execute.before"](...taskCall("builder", "c1"))
     await assert.rejects(
       () => plugin["tool.execute.before"](...taskCall("builder", "c2")),
@@ -48,6 +52,7 @@ test("serialize-task: the same agent and provider serve one task at a time", asy
 test("serialize-task: one provider blocks different agents", async () => {
   await withConfig(configDir({ builder: "provB", planner: "provB" }), async () => {
     const plugin = await OneTaskPerModel()
+    asOrchestrator()
     await plugin["tool.execute.before"](...taskCall("builder", "c4"))
     await assert.rejects(
       () => plugin["tool.execute.before"](...taskCall("planner", "c5")),
@@ -60,6 +65,7 @@ test("serialize-task: one provider blocks different agents", async () => {
 test("serialize-task: different providers may pipeline concurrently", async () => {
   await withConfig(configDir({ builder: "provC", planner: "provD" }), async () => {
     const plugin = await OneTaskPerModel()
+    asOrchestrator()
     await plugin["tool.execute.before"](...taskCall("builder", "c6"))
     await plugin["tool.execute.before"](...taskCall("planner", "c7"))
     await plugin["tool.execute.after"](...taskCall("builder", "c6"))
@@ -70,6 +76,7 @@ test("serialize-task: different providers may pipeline concurrently", async () =
 test("serialize-task: a terminal tool part releases the lock", async () => {
   await withConfig(configDir({ builder: "provE" }), async () => {
     const plugin = await OneTaskPerModel()
+    asOrchestrator()
     await plugin["tool.execute.before"](...taskCall("builder", "c8"))
     await plugin.event({
       event: {
@@ -81,5 +88,16 @@ test("serialize-task: a terminal tool part releases the lock", async () => {
     })
     await plugin["tool.execute.before"](...taskCall("builder", "c9"))
     await plugin["tool.execute.after"](...taskCall("builder", "c9"))
+  })
+})
+
+test("serialize-task: non-ocodesa sessions are not serialized", async () => {
+  await withConfig(configDir({ builder: "provF" }), async () => {
+    const plugin = await OneTaskPerModel()
+    rememberAgent("ses_serial", "build")
+    await plugin["tool.execute.before"](...taskCall("builder", "c10"))
+    await plugin["tool.execute.before"](...taskCall("builder", "c11"))
+    await plugin["tool.execute.after"](...taskCall("builder", "c10"))
+    await plugin["tool.execute.after"](...taskCall("builder", "c11"))
   })
 })

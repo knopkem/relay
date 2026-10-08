@@ -23,6 +23,7 @@ test("resolveMode defaults to full and rejects unknown values", () => {
   assert.equal(resolveMode(undefined), "full")
   assert.equal(resolveMode("off"), "off")
   assert.equal(resolveMode("advisory"), "advisory")
+  assert.equal(resolveMode("pull"), "pull")
   assert.equal(resolveMode("FULL"), "full")
   assert.equal(resolveMode("nonsense"), "full")
 })
@@ -407,7 +408,7 @@ test("supervise: escalation asks the watcher with failure signals", async () => 
   })
 })
 
-test("supervise: same-model watcher downgrades lazily, with no API call in the factory", async () => {
+test("supervise: same-model watcher downgrades to pull lazily, with no API call in the factory", async () => {
   await withMode("full", async () => {
     const agents = [
       { name: "implementer", model: { providerID: "p", modelID: "same" } },
@@ -441,13 +442,13 @@ test("supervise: same-model watcher downgrades lazily, with no API call in the f
     await plugin["experimental.chat.messages.transform"]({}, output)
     const text = output.messages[0].parts[0].text
     assert.match(text, /same command has failed 3 times/)
-    assert.doesNotMatch(text, /ask_supervisor/)
+    assert.match(text, /ask_supervisor/)
     await new Promise((resolve) => setImmediate(resolve))
-    assert.equal(prompts.length, 0)
+    assert.equal(prompts.length, 0) // the push channels stay off
   })
 })
 
-test("supervise: ask_supervisor resolves the gate and refuses a same-model watcher without prompting", async () => {
+test("supervise: a same-model ask reaches the watcher and carries a same-model note", async () => {
   await withMode("full", async () => {
     const agents = [
       { name: "implementer", model: { providerID: "p", modelID: "same" } },
@@ -459,8 +460,29 @@ test("supervise: ask_supervisor resolves the gate and refuses a same-model watch
       { question: "q" },
       { agent: "implementer", sessionID: "sup_same_ask" },
     )
-    assert.match(reply, /advisory mode; ask_supervisor is disabled/)
+    assert.match(reply, /Check src\/a\.ts first\./)
+    assert.match(reply, /same-model supervisor/)
+    assert.equal(prompts.length, 1)
+    assert.equal(prompts[0].agent, "watcher")
+  })
+})
+
+test("supervise: pull mode keeps ask_supervisor and skips the push channels", async () => {
+  await withMode("pull", async () => {
+    const { client, prompts } = mockClient()
+    const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    await classifyChild(plugin, "sup_pull")
+    for (let i = 0; i < 25; i += 1) {
+      await plugin.event(toolEvent("sup_pull", { tool: "read", input: { filePath: "src/a.ts" } }))
+    }
+    await new Promise((resolve) => setImmediate(resolve))
     assert.equal(prompts.length, 0)
+    const answer = await plugin.tool.ask_supervisor.execute(
+      { question: "q" },
+      { agent: "implementer", sessionID: "sup_pull" },
+    )
+    assert.equal(answer, "Check src/a.ts first.")
+    assert.equal(prompts.length, 1)
   })
 })
 

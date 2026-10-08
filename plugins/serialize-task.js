@@ -20,6 +20,8 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
+import { isOcodesaSession, withAgentTracking } from "./lib/agent-gate.js"
+
 const STALE_MS = 2 * 60 * 60 * 1000
 const running = new Map()
 const calls = new Map()
@@ -83,42 +85,44 @@ function isTerminalTaskPart(part) {
   )
 }
 
-export const OneTaskPerModel = async () => ({
-  "tool.execute.before": async (input, output) => {
-    if (input?.tool !== "task") return
-    const agent = output?.args?.subagent_type ?? output?.args?.agent ?? ""
-    const keys = keysFor(agent)
-    sweep()
-    const busy = keys.filter((key) => running.has(key))
-    if (busy.length) {
-      throw new Error(
-        `Task blocked: ${busy.map(label).join(" and ")} already running a task. Each model serves one session at a time — wait for it to finish.`,
-      )
-    }
-    const now = Date.now()
-    for (const key of keys) running.set(key, { at: now, callID: input.callID })
-    if (input.callID) calls.set(input.callID, keys)
-  },
-  "tool.execute.after": async (input, output) => {
-    if (input?.tool !== "task") return
-    let keys = input.callID ? calls.get(input.callID) : undefined
-    if (!keys) {
-      const agent =
-        input?.args?.subagent_type ??
-        output?.args?.subagent_type ??
-        output?.args?.agent
-      if (agent) keys = keysFor(agent)
-    }
-    if (keys) release(keys, input.callID)
-    if (input?.callID) calls.delete(input.callID)
-  },
-  event: async ({ event }) => {
-    if (event?.type !== "message.part.updated") return
-    const part = event.properties?.part
-    if (!isTerminalTaskPart(part)) return
-    const keys = part.callID ? calls.get(part.callID) : undefined
-    if (!keys) return
-    release(keys, part.callID)
-    calls.delete(part.callID)
-  },
-})
+export const OneTaskPerModel = async () =>
+  withAgentTracking({
+    "tool.execute.before": async (input, output) => {
+      if (input?.tool !== "task") return
+      if (!isOcodesaSession(input?.sessionID)) return
+      const agent = output?.args?.subagent_type ?? output?.args?.agent ?? ""
+      const keys = keysFor(agent)
+      sweep()
+      const busy = keys.filter((key) => running.has(key))
+      if (busy.length) {
+        throw new Error(
+          `Task blocked: ${busy.map(label).join(" and ")} already running a task. Each model serves one session at a time — wait for it to finish.`,
+        )
+      }
+      const now = Date.now()
+      for (const key of keys) running.set(key, { at: now, callID: input.callID })
+      if (input.callID) calls.set(input.callID, keys)
+    },
+    "tool.execute.after": async (input, output) => {
+      if (input?.tool !== "task") return
+      let keys = input.callID ? calls.get(input.callID) : undefined
+      if (!keys) {
+        const agent =
+          input?.args?.subagent_type ??
+          output?.args?.subagent_type ??
+          output?.args?.agent
+        if (agent) keys = keysFor(agent)
+      }
+      if (keys) release(keys, input.callID)
+      if (input?.callID) calls.delete(input.callID)
+    },
+    event: async ({ event }) => {
+      if (event?.type !== "message.part.updated") return
+      const part = event.properties?.part
+      if (!isTerminalTaskPart(part)) return
+      const keys = part.callID ? calls.get(part.callID) : undefined
+      if (!keys) return
+      release(keys, part.callID)
+      calls.delete(part.callID)
+    },
+  })

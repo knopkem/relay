@@ -15,13 +15,14 @@ the relevant one before changing behavior.
 ## Layout
 
 - `agent/*.md` — agent templates. They carry `__*_MODEL__` placeholders and
-  `# __IMPLEMENTER_OPTIONS__` / `# __PLANNER_OPTIONS__` markers; never hardcode
-  model ids.
+  `# __<ROLE>_OPTIONS__` markers; never hardcode model ids.
 - `command/*.md` — slash commands (`/pipeline`).
 - `plugins/supervise.js` — `ask_supervisor`, canned advisories, prereview.
 - `plugins/loop-breaker.js`, `plugins/write-guard.js`,
   `plugins/serialize-task.js`, `plugins/compaction-ledger.js` — guards; keep
-  their behavior intact.
+  their behavior intact. They act only in ocodesa agent sessions, resolved by
+  `plugins/lib/agent-gate.js` from the chat hooks; `build`/`plan` sessions must
+  stay untouched.
 - `plugins/tests/*.test.js` — `node --test`, mock clients only, no models or
   network, no sleeping on real processes.
 - `scripts/set-models.py` — renders `agent/` into gitignored `agent.local/`

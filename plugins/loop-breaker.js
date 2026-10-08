@@ -6,7 +6,7 @@
 //   - the same action run 3x consecutively,
 //   - the same action producing identical output 3x, even when interleaved
 //     with other calls,
-//   - 5 consecutive edits to one file with no command run in between.
+//   - 5 consecutive edits to one file with no other call in between.
 // Each abort surfaces as a tool error telling the model to change approach
 // or report the blocker, which breaks variation loops that doom_loop misses.
 //
@@ -15,6 +15,23 @@
 // After TRIP_LIMIT aborts the session is locked: every further tool call is
 // rejected, and the first locked attempt aborts the session via the client
 // so an ignoring model cannot spin forever.
+//
+// Only ocodesa-role sessions are guarded (see lib/agent-gate.js).
+//
+// Rules that keep the guard fair to each role:
+//   - only edits/writes to one file in a row feed the edit-run limit; any
+//     other call (read, search, bash, task) resets it, so investigating a
+//     failed edit is never punished, and a read is never blocked by it;
+//   - an aborted call is remembered: repeating it is rejected immediately,
+//     until a different call succeeds;
+//   - the words of an abort fit the role: only roles with shell access are
+//     told to run the project's checks, and only the role that owns a report
+//     file is told to update it;
+//   - the abort ratchet and the session lock apply only to roles that can
+//     run commands (RATCHET_AGENTS); read-only roles are blocked call by
+//     call but never locked mid-write.
+
+import { agentFor, forgetAgent, isOcodesaSession, withAgentTracking } from "./lib/agent-gate.js"
 
 const SAME_ACTION_LIMIT = 3
 const RESULT_REPEAT_LIMIT = 3
@@ -22,6 +39,29 @@ const EDIT_RUN_LIMIT = 5
 const TRIP_LIMIT = 5
 const MAX_SESSIONS = 64
 const MAX_RESULTS = 32
+
+// Roles whose permission config allows bash; only they ratchet toward the lock.
+const RATCHET_AGENTS = new Set(["implementer", "verifier", "orchestrator"])
+
+const RECOVERY = {
+  implementer: 'If you are stuck, update HANDOFF.md and reply "BLOCKED: <reason>".',
+  verifier: 'If you are stuck, update ISSUES.md and reply "BLOCKED: <reason>".',
+  planner: 'If you are stuck, write PLAN.md in one pass and reply "PLAN-FAIL: <reason>".',
+}
+
+const GENERIC_RECOVERY = 'If you are stuck, report your blocker, e.g. "BLOCKED: <reason>".'
+
+function recoveryHint(agent) {
+  return RECOVERY[agent] ?? GENERIC_RECOVERY
+}
+
+function editRunHint(agent) {
+  if (agent === "planner") {
+    return "Finish the file in one whole-file write instead of many small edits."
+  }
+  if (RATCHET_AGENTS.has(agent)) return "Run the project's typecheck/tests now."
+  return "Change the approach."
+}
 
 const sessions = new Map()
 
@@ -34,6 +74,7 @@ function stateFor(sessionID) {
       results: new Map(),
       lastFile: "",
       editRun: 0,
+      blocked: new Set(),
       trips: 0,
       locked: false,
       aborted: false,
@@ -119,9 +160,14 @@ function fingerprintOf(tool, args) {
   return `${tool}:${hash(JSON.stringify(args ?? {}))}`
 }
 
-// Record an abort and return the error to throw. Once the session reaches
-// TRIP_LIMIT aborts it is locked and the message tells the model how to end.
-function trip(state, message) {
+// Record an abort and return the error to throw. The aborted fingerprint is
+// remembered so an immediate retry is rejected too. Once a ratcheted session
+// reaches TRIP_LIMIT aborts it is locked and the message tells the model how
+// to end. Roles without shell access cannot satisfy the guard's remedy, so
+// they are blocked call by call but never ratcheted or locked.
+function trip(state, fingerprint, message, agent) {
+  state.blocked.add(fingerprint)
+  if (!RATCHET_AGENTS.has(agent)) return new Error(message)
   state.trips += 1
   if (state.trips < TRIP_LIMIT) return new Error(message)
   state.locked = true
@@ -140,31 +186,44 @@ export const LoopBreaker = async ({ client } = {}) => {
     }
   }
 
-  return {
+  return withAgentTracking({
     "tool.execute.before": async (input, output) => {
+      if (!isOcodesaSession(input?.sessionID)) return
+      const sessionID = input?.sessionID ?? "global"
       const tool = input?.tool ?? ""
       const args = output?.args ?? {}
-      const state = stateFor(input?.sessionID ?? "global")
+      const agent = agentFor(sessionID)
+      const state = stateFor(sessionID)
       const fp = fingerprintOf(tool, args)
+      const isEdit = tool === "edit" || tool === "write"
 
       if (state.locked) {
         if (!state.aborted) {
           state.aborted = true
-          await abortSession(input?.sessionID)
+          await abortSession(sessionID)
         }
         throw new Error(
           `Loop breaker: session locked after ${state.trips} aborted calls — tools are disabled. Reply with your blocker now, e.g. "BLOCKED: <reason>".`,
         )
       }
 
+      if (state.blocked.has(fp)) {
+        throw trip(
+          state,
+          fp,
+          `Loop breaker: "${labelFor(tool, args)}" was just blocked and is being repeated. Take a different step. ${recoveryHint(agent)}`,
+          agent,
+        )
+      }
+
       state.sameRun = fp === state.lastFp ? state.sameRun + 1 : 1
       state.lastFp = fp
 
-      if (tool === "edit" || tool === "write") {
+      if (isEdit) {
         const file = args.filePath ?? ""
         state.editRun = file === state.lastFile ? state.editRun + 1 : 1
         state.lastFile = file
-      } else if (tool === "bash" || tool === "task") {
+      } else {
         state.lastFile = ""
         state.editRun = 0
       }
@@ -172,24 +231,33 @@ export const LoopBreaker = async ({ client } = {}) => {
       if (state.sameRun >= SAME_ACTION_LIMIT) {
         throw trip(
           state,
-          `Loop breaker: "${labelFor(tool, args)}" ran ${state.sameRun} times in a row with no change. Stop repeating it — read the output, change the approach. If you are stuck, update HANDOFF.md and reply "BLOCKED: <reason>".`,
+          fp,
+          `Loop breaker: "${labelFor(tool, args)}" ran ${state.sameRun} times in a row with no change. Stop repeating it — read the output, change the approach. ${recoveryHint(agent)}`,
+          agent,
         )
       }
-      if (state.editRun >= EDIT_RUN_LIMIT) {
+      if (isEdit && state.editRun >= EDIT_RUN_LIMIT) {
         throw trip(
           state,
-          `Loop breaker: ${state.editRun} consecutive edits to ${state.lastFile || "one file"} without running a command. Run the project's typecheck/tests now. If you are stuck, update HANDOFF.md and reply "BLOCKED: <reason>".`,
+          fp,
+          `Loop breaker: ${state.editRun} consecutive edits to ${state.lastFile || "one file"} without another action in between. ${editRunHint(agent)} ${recoveryHint(agent)}`,
+          agent,
         )
       }
       const seen = state.results.get(fp)
       if (seen && seen.repeats >= RESULT_REPEAT_LIMIT) {
         throw trip(
           state,
-          `Loop breaker: "${labelFor(tool, args)}" produced identical output ${seen.repeats} times — retrying will not change the result. Change the approach, or update HANDOFF.md and reply "BLOCKED: <reason>".`,
+          fp,
+          `Loop breaker: "${labelFor(tool, args)}" produced identical output ${seen.repeats} times — retrying will not change the result. Change the approach. ${recoveryHint(agent)}`,
+          agent,
         )
       }
+
+      state.blocked.clear()
     },
     "tool.execute.after": async (input, output) => {
+      if (!isOcodesaSession(input?.sessionID)) return
       const tool = input?.tool ?? ""
       const args = output?.args ?? input?.args ?? {}
       const text = typeof output?.output === "string" ? output.output : ""
@@ -215,8 +283,9 @@ export const LoopBreaker = async ({ client } = {}) => {
         event.properties?.info?.id ??
         event.properties?.info?.sessionID
       if (id) sessions.delete(id)
+      if (id) forgetAgent(id)
     },
-  }
+  })
 }
 
 LoopBreaker.__test = {

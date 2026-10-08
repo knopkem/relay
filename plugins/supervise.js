@@ -12,13 +12,16 @@
 //
 // The watcher runs as the `watcher` agent (read-only, good model) in a child
 // session that persists for the implementer session, so the plan is prefilled
-// once. Everything is gated by OCODESA_SUPERVISE=off|advisory|full (default
-// full) and becomes a no-op when no watcher agent is configured.
+// once. Everything is gated by OCODESA_SUPERVISE=off|advisory|pull|full
+// (default full) and becomes a no-op when no watcher agent is configured.
 //
 // The same-model downgrade is resolved LAZILY (first completed tool event, the
 // first ask_supervisor call, or the first watcher prompt) — never in this
 // factory: the factory runs inside opencode's instance bootstrap, and an
-// opencode API call from there deadlocks startup into a blank TUI.
+// opencode API call from there deadlocks startup into a blank TUI. A same-model
+// pair downgrades full to pull, not to advisory: an explicit ask still helps
+// (fresh context, summarized problem), while the push channels would only add
+// correlated noise and provider contention.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -45,7 +48,7 @@ const HANDOFF_NUDGE =
 
 function resolveMode(value) {
   const raw = String(value ?? "full").toLowerCase()
-  if (raw === "off" || raw === "advisory" || raw === "full") return raw
+  if (raw === "off" || raw === "advisory" || raw === "pull" || raw === "full") return raw
   return "full"
 }
 
@@ -133,9 +136,11 @@ function failureSignals(state) {
   return lines
 }
 
-// Model-aware supervision: a watcher on the implementer's own model adds no
-// information, so supervision auto-downgrades to advisory-only when the two
-// configured models are identical. Unknown models keep full supervision.
+// Model-aware supervision: an explicit ask to the implementer's own model
+// still helps (fresh context, summarized problem), but automatic push channels
+// would add correlated noise on the same provider — so a same-model pair
+// downgrades to "pull": ask_supervisor stays, prereview/escalation switch off.
+// Unknown models keep full supervision.
 function agentModels(agents) {
   const list = Array.isArray(agents) ? agents : []
   const format = (model) =>
@@ -231,22 +236,23 @@ export const Supervisor = async ({ client, directory }) => {
     }
   }
 
-  // "closed" = definitely the same model, "open" = definitely different,
-  // "unknown" = the agents API has not answered yet (keep full supervision).
+  // "closed" = no supervision at all (off/advisory), "open" = definitely
+  // different models, "same" = same-model pair (pull only), "unknown" = the
+  // agents API has not answered yet (keep full supervision until it does).
   // Resolution is LAZY on purpose: this factory runs inside opencode's instance
   // bootstrap, so calling the opencode API from it (client.app.agents) waits on
   // a server that is itself waiting for this plugin to finish loading — startup
   // then hangs on a blank TUI with no error in the log. The first hook that
   // needs the gate resolves it instead.
-  let watcherGate = mode === "full" ? "unknown" : "closed"
+  let watcherGate = mode === "full" || mode === "pull" ? "unknown" : "closed"
 
   async function resolveGate(reason) {
     if (watcherGate !== "unknown") return watcherGate
     const pair = await detectModels(client, directory)
     if (pair && modelsDiffer(pair) === false) {
-      watcherGate = "closed"
-      mode = "advisory"
-      writeLog({ kind: "downgrade", reason, model: pair.implementer })
+      if (mode === "full") mode = "pull"
+      watcherGate = "same"
+      writeLog({ kind: "downgrade", reason, to: mode, model: pair.implementer })
       return watcherGate
     }
     watcherGate = "open"
@@ -273,7 +279,7 @@ export const Supervisor = async ({ client, directory }) => {
 
   async function askWatcher(state, ownerSessionID, promptText, signal) {
     if (!(await watcherAllowed())) {
-      throw new Error("watcher disabled: same model as the implementer")
+      throw new Error("watcher disabled: supervision is off")
     }
     if (!state.watcherSessionID) {
       const created = await client.session.create({
@@ -490,7 +496,7 @@ export const Supervisor = async ({ client, directory }) => {
             return "ask_supervisor is only available to the implementer agent."
           }
           await resolveGate("same-model-late")
-          if (mode !== "full") {
+          if (mode === "off" || mode === "advisory") {
             return `Supervision is in ${mode} mode; ask_supervisor is disabled. Continue with PLAN.md.`
           }
           const state = stateFor(context.sessionID)
@@ -517,8 +523,12 @@ export const Supervisor = async ({ client, directory }) => {
               watchPrompt(state, "## Question", question),
               context.abort,
             )
-            writeLog({ kind: "ask", sessionID: context.sessionID, question, answer })
-            return answer || "Supervisor returned nothing. Continue with PLAN.md."
+            const sameModel = watcherGate === "same"
+            writeLog({ kind: "ask", sessionID: context.sessionID, question, answer, same_model: sameModel })
+            if (!answer) return "Supervisor returned nothing. Continue with PLAN.md."
+            return sameModel
+              ? `${answer}\n(same-model supervisor — cross-check against PLAN.md)`
+              : answer
           } catch (error) {
             writeLog({ kind: "ask-error", sessionID: context.sessionID, error: String(error) })
             return `Supervisor unavailable: ${describeError(error)}. Continue; note it in HANDOFF.md.`

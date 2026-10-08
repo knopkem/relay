@@ -53,10 +53,11 @@ should need no judgment calls:
 The plan is authoritative: the implementer may not redesign interfaces or
 rename files, and must report deviations with the exact PLAN.md line.
 
-**AGENTS.md** — only when the project has none: a short, factual conventions
-file (language/tooling, build/test commands, style, error handling). Use only
-what you found in the code or the request states; never overwrite an existing
-AGENTS.md and never invent conventions.
+**AGENTS.md** — write one whenever the project has none: a short, factual
+conventions file (language/tooling, build/test commands, style, error
+handling). Use only what you found in the code or the request states; never
+overwrite an existing AGENTS.md and never invent conventions. The implementer
+expects this file; writing it is part of planning, not extra scope.
 
 Rules:
 - The request arrives as `## Goal:` text or as a `## Brief: <path>` file; for a

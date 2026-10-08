@@ -39,18 +39,23 @@ mutations reach the model; plugin tools use their bare name and receive
 
 The watcher session persists for the implementer session, so PLAN.md is
 prefilled once. In advisory-only mode (`OCODESA_SUPERVISE=advisory`) the pull
-tool and prereview are disabled and only canned advisories run.
+tool and prereview are disabled and only canned advisories run. In `pull` mode
+the `ask_supervisor` tool stays while escalation and prereview are off.
 
 **Same-model guard.** At startup the plugin compares the `implementer` and
 `watcher` models via the agents API. When they are identical, supervision
-auto-downgrades to advisory-only and `ask_supervisor` is not registered — a
-watcher on the implementer's own model adds no information. If the API cannot
-tell the models apart, full supervision is kept.
+auto-downgrades `full` to `pull`: `ask_supervisor` still works, because a fresh
+context on the same weights often breaks a loop, but the automatic push
+channels (escalation, prereview) are switched off to avoid correlated noise and
+provider contention. The answer carries a `(same-model supervisor — cross-check
+against PLAN.md)` note. If the API cannot tell the models apart, full
+supervision is kept.
 
 ## Configuration
 
-- `OCODESA_SUPERVISE=off|advisory|full` — default `full`. `off` makes the
-  plugin inert.
+- `OCODESA_SUPERVISE=off|advisory|pull|full` — default `full`. `off` makes the
+  plugin inert; `pull` keeps `ask_supervisor` and disables escalation and
+  prereview; `advisory` keeps only canned advisories.
 - `OCODESA_SUPERVISE_DEBUG=1` — append JSONL events to
   `.ocodesa/supervise.jsonl` in the target project (asks, injections, errors).
 - Budgets (constants at the top of `plugins/supervise.js`): 10 asks per run,
@@ -63,7 +68,7 @@ tell the models apart, full supervision is kept.
 (`set-models.py` role `watcher`, default → verifier). It answers with
 direction only, never code, and says "report a blocker" when the plan itself
 is wrong. Point it at a different model than `implementer`; otherwise the
-same-model guard makes supervision advisory-only.
+same-model guard limits supervision to `pull` (ask only).
 
 ## Failure modes and fallbacks
 

@@ -6,9 +6,7 @@ description: >-
   implementer. Audit mode is read-only.
 mode: subagent
 model: __VERIFIER_MODEL__
-reasoningEffort: none
-chat_template_kwargs:
-  enable_thinking: false
+# __VERIFIER_OPTIONS__
 temperature: 0.3
 permission:
   doom_loop: deny
