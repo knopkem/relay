@@ -17,6 +17,10 @@ const {
   excluded,
   sweepChanged,
   buildSnapshot,
+  agentModels,
+  frontmatterModel,
+  taskChildID,
+  detailStale,
   setTimings,
   setLimits,
   resetSessions,
@@ -42,8 +46,9 @@ function sha(text) {
 const CLEAN = "src/a.ts:3 @ abc123 | nit | tidy\nMILESTONE-REVIEW: clean"
 const BLOCKED = "src/a.ts:3 @ abc123 | blocker | wrong return type\nMILESTONE-REVIEW: 1 blocker(s), 0 should-fix"
 
-function mockClient({ agents, reviewerText = CLEAN, onPrompt } = {}) {
+function mockClient({ agents, reviewerText = CLEAN, onPrompt, sessionAgent } = {}) {
   const prompts = []
+  const gets = []
   let seq = 0
   const client = {
     ...(agents ? { app: { agents: async () => ({ data: agents }) } } : {}),
@@ -51,6 +56,10 @@ function mockClient({ agents, reviewerText = CLEAN, onPrompt } = {}) {
       create: async ({ body }) => {
         seq += 1
         return { data: { id: `ses_${seq}`, ...body } }
+      },
+      get: async ({ path: p }) => {
+        gets.push(p.id)
+        return { data: { id: p.id, agent: sessionAgent ?? null } }
       },
       prompt: async ({ path: p, body }) => {
         const entry = { id: p.id, agent: body.agent, text: body.parts[0].text }
@@ -61,10 +70,10 @@ function mockClient({ agents, reviewerText = CLEAN, onPrompt } = {}) {
       },
     },
   }
-  return { client, prompts }
+  return { client, prompts, gets }
 }
 
-function taskEvent(parent, subagent, child) {
+function taskEvent(parent, subagent, child, { key = "sessionId" } = {}) {
   return {
     event: {
       type: "message.part.updated",
@@ -76,7 +85,7 @@ function taskEvent(parent, subagent, child) {
           state: {
             status: "completed",
             input: { subagent_type: subagent },
-            metadata: { sessionID: child },
+            metadata: { [key]: child },
           },
         },
       },
@@ -133,6 +142,28 @@ test("resolveMode defaults to auto and rejects unknown values", () => {
   assert.equal(resolveMode("review"), "review")
   assert.equal(resolveMode("AUTO"), "auto")
   assert.equal(resolveMode("nonsense"), "auto")
+})
+
+test("taskChildID accepts the renamed and legacy metadata keys", () => {
+  assert.equal(taskChildID({ state: { metadata: { sessionId: "a" } } }), "a")
+  assert.equal(taskChildID({ state: { metadata: { sessionID: "b" } } }), "b")
+  assert.equal(taskChildID({ state: { metadata: { sessionId: "a", sessionID: "b" } } }), "a")
+  assert.equal(taskChildID({ state: { metadata: {} } }), null)
+  assert.equal(taskChildID({}), null)
+})
+
+test("frontmatterModel reads the rendered agent model", () => {
+  const previous = process.env.OPENCODE_CONFIG_DIR
+  const dir = scratch()
+  write(dir, path.join("agent", "reviewer.md"), "---\nmodel: splash/Vendor/Big-27B\n---\n")
+  process.env.OPENCODE_CONFIG_DIR = dir
+  try {
+    assert.deepEqual(frontmatterModel("reviewer"), { provider: "splash", model: "Vendor/Big-27B" })
+    assert.equal(frontmatterModel("missing"), null)
+  } finally {
+    if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR
+    else process.env.OPENCODE_CONFIG_DIR = previous
+  }
 })
 
 test("sanitizeMilestone keeps safe ids and caps length", () => {
@@ -357,9 +388,190 @@ test("milestone: snapshots only cover files changed since the last boundary", as
   })
 })
 
-test("milestone: JIT queues next-milestone detail on the planner and injects it", async () => {
+test("milestone: classifies implementer sessions via session.get without task metadata", async () => {
   resetSessions()
-  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "jit" }, async () => {
+  await withEnv({ OCODESA_MILESTONE: "serial" }, async () => {
+    const root = scratch()
+    write(root, "HANDOFF.md", "state\n")
+    write(root, "src/fallback.ts", "x\n")
+    const { client, gets } = mockClient({ reviewerText: CLEAN, sessionAgent: "implementer" })
+    const plugin = await Milestone({ client, directory: root })
+    await plugin.event(editEvent("ses_fallback", "src/fallback.ts"))
+    assert.ok(gets.includes("ses_fallback"))
+    await plugin.tool.milestone_done.execute(
+      { milestone: "M1", summary: "s", final: true },
+      { agent: "implementer", sessionID: "ses_fallback" },
+    )
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(root, ".ocodesa", "review", "M1", "manifest.json"), "utf8"),
+    )
+    assert.ok(manifest.files.some((file) => file.path === path.join("src", "fallback.ts")))
+  })
+})
+
+test("milestone: task events with the renamed sessionId key classify without session.get", async () => {
+  resetSessions()
+  await withEnv({ OCODESA_MILESTONE: "serial" }, async () => {
+    const root = scratch()
+    write(root, "HANDOFF.md", "state\n")
+    const { client, gets } = mockClient({ reviewerText: CLEAN })
+    const plugin = await Milestone({ client, directory: root })
+    await plugin.event(taskEvent("ses_parent", "implementer", "ses_renamed"))
+    await plugin.event(editEvent("ses_renamed", "src/a.ts"))
+    assert.deepEqual(gets, [])
+  })
+})
+
+test("detailStale skips docs for milestones the builder already passed", () => {
+  const ids = ["M1", "M2", "M3"]
+  assert.equal(detailStale(ids, null, "M1"), false)
+  assert.equal(detailStale(ids, "M1", "M1"), true)
+  assert.equal(detailStale(ids, "M1", "M2"), false)
+  assert.equal(detailStale(ids, "M2", "M3"), false)
+  assert.equal(detailStale(ids, "M3", "M3"), true)
+  assert.equal(detailStale(ids, "MX", "M1"), false)
+  assert.equal(detailStale(ids, "M1", "MX"), false)
+})
+
+test("milestone: JIT announces via the message agent when no hook classified the session", async () => {
+  resetSessions()
+  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "auto" }, async () => {
+    const agents = [
+      { name: "implementer", model: { providerID: "b", modelID: "flash" } },
+      { name: "reviewer", model: { providerID: "a", modelID: "big" } },
+      { name: "planner", model: { providerID: "a", modelID: "big" } },
+    ]
+    const { client } = mockClient({ agents })
+    const plugin = await Milestone({ client, directory: scratch() })
+    const output = {
+      messages: [
+        {
+          info: { sessionID: "ses_planner_msg", role: "user", agent: "planner" },
+          parts: [{ type: "text", text: "## Target: x\n## Goal: y" }],
+        },
+      ],
+    }
+    await plugin["experimental.chat.messages.transform"]({}, output)
+    assert.match(output.messages[0].parts[0].text, /\[milestone\] JIT mode/)
+  })
+})
+
+test("milestone: JIT announces from the planner brief text as a last resort", async () => {
+  resetSessions()
+  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "auto" }, async () => {
+    const agents = [
+      { name: "implementer", model: { providerID: "b", modelID: "flash" } },
+      { name: "reviewer", model: { providerID: "a", modelID: "big" } },
+      { name: "planner", model: { providerID: "a", modelID: "big" } },
+    ]
+    const { client } = mockClient({ agents })
+    const plugin = await Milestone({ client, directory: scratch() })
+    const output = {
+      messages: [
+        {
+          info: { sessionID: "ses_planner_brief", role: "user" },
+          parts: [
+            {
+              type: "text",
+              text: "## Target: x\n## Goal: y\nWrite PLAN.md and, if the project has no AGENTS.md, a short AGENTS.md.",
+            },
+          ],
+        },
+      ],
+    }
+    await plugin["experimental.chat.messages.transform"]({}, output)
+    assert.match(output.messages[0].parts[0].text, /\[milestone\] JIT mode/)
+  })
+})
+
+test("milestone: JIT announces through the system prompt", async () => {
+  resetSessions()
+  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "auto" }, async () => {
+    const agents = [
+      { name: "implementer", model: { providerID: "b", modelID: "flash" } },
+      { name: "reviewer", model: { providerID: "a", modelID: "big" } },
+      { name: "planner", model: { providerID: "a", modelID: "big" } },
+    ]
+    const { client } = mockClient({ agents })
+    const plugin = await Milestone({ client, directory: scratch() })
+    const output = {
+      system: ["You are the **planner**. You design; a fast implementer fills in your blueprint."],
+    }
+    await plugin["experimental.chat.system.transform"]({ sessionID: "ses_planner_sys" }, output)
+    assert.equal(output.system.length, 2)
+    assert.match(output.system[1], /\[milestone\] JIT mode/)
+  })
+})
+
+test("milestone: the system channel never touches non-planner or detail sessions", async () => {
+  resetSessions()
+  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "auto" }, async () => {
+    const agents = [
+      { name: "implementer", model: { providerID: "b", modelID: "flash" } },
+      { name: "reviewer", model: { providerID: "a", modelID: "big" } },
+      { name: "planner", model: { providerID: "a", modelID: "big" } },
+    ]
+    const root = scratch()
+    write(root, "PLAN.md", ["### M1 — a", "### M2 — b"].join("\n"))
+    const { client, prompts } = mockClient({
+      agents,
+      onPrompt: async (entry) => {
+        if (entry.agent !== "planner") return CLEAN
+        const match = entry.text.match(/MILESTONES\/(M\d+)\.md/)
+        if (match) write(root, `MILESTONES/${match[1]}.md`, `# ${match[1]}\n`)
+        return "MILESTONE-DETAIL: ok"
+      },
+    })
+    const plugin = await Milestone({ client, directory: root })
+    const implementerSystem = {
+      system: ["You are the **implementer**. You receive the project's PLAN.md."],
+    }
+    await plugin["experimental.chat.system.transform"]({ sessionID: "ses_i" }, implementerSystem)
+    assert.equal(implementerSystem.system.length, 1)
+
+    await plugin.event(taskEvent("ses_parent", "implementer", "ses_i"))
+    await flush()
+    const detailSession = prompts.find((p) => p.agent === "planner").id
+    const detailSystem = {
+      system: ["You are the **planner**. You design; a fast implementer fills in your blueprint."],
+    }
+    await plugin["experimental.chat.system.transform"]({ sessionID: detailSession }, detailSystem)
+    assert.equal(detailSystem.system.length, 1)
+  })
+})
+
+test("milestone: JIT queues first-milestone detail at implementer start", async () => {
+  resetSessions()
+  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "auto" }, async () => {
+    const root = scratch()
+    write(root, "PLAN.md", ["## Milestones", "### M1 — a", "### M2 — b"].join("\n"))
+    const agents = [
+      { name: "implementer", model: { providerID: "b", modelID: "flash" } },
+      { name: "reviewer", model: { providerID: "a", modelID: "big" } },
+      { name: "planner", model: { providerID: "a", modelID: "big" } },
+    ]
+    const { client, prompts } = mockClient({
+      agents,
+      onPrompt: async (entry) => {
+        if (entry.agent === "planner") {
+          write(root, "MILESTONES/M1.md", "# M1 detail\n")
+          return "MILESTONE-DETAIL: ok"
+        }
+        return CLEAN
+      },
+    })
+    const plugin = await Milestone({ client, directory: root })
+    await plugin.event(taskEvent("ses_parent", "implementer", "ses_i"))
+    await flush()
+    const plannerPrompts = prompts.filter((p) => p.agent === "planner")
+    assert.equal(plannerPrompts.length, 1)
+    assert.match(plannerPrompts[0].text, /MILESTONES\/M1\.md/)
+  })
+})
+
+test("milestone: JIT queues the next-milestone detail on the planner and injects it", async () => {
+  resetSessions()
+  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "auto" }, async () => {
     const root = scratch()
     write(
       root,
@@ -375,7 +587,7 @@ test("milestone: JIT queues next-milestone detail on the planner and injects it"
       agents,
       onPrompt: async (entry) => {
         if (entry.agent === "planner") {
-          write(root, "MILESTONES/M2.md", "# M2 detail\n")
+          write(root, "MILESTONES/M1.md", "# M1 detail\n")
           return "MILESTONE-DETAIL: ok"
         }
         return CLEAN
@@ -387,8 +599,8 @@ test("milestone: JIT queues next-milestone detail on the planner and injects it"
     await flush()
     const plannerPrompts = prompts.filter((p) => p.agent === "planner")
     assert.equal(plannerPrompts.length, 1)
-    assert.match(plannerPrompts[0].text, /MILESTONES\/M2\.md/)
-    assert.ok(fs.existsSync(path.join(root, "MILESTONES", "M2.md")))
+    assert.match(plannerPrompts[0].text, /MILESTONES\/M1\.md/)
+    assert.ok(fs.existsSync(path.join(root, "MILESTONES", "M1.md")))
     const detailTurn = userTurn(plannerPrompts[0].id)
     await plugin["chat.params"]({ sessionID: plannerPrompts[0].id, agent: "planner" })
     await plugin["experimental.chat.messages.transform"]({}, detailTurn)
@@ -396,13 +608,45 @@ test("milestone: JIT queues next-milestone detail on the planner and injects it"
     const output = userTurn("ses_i")
     await plugin["experimental.chat.messages.transform"]({}, output)
     const injected = output.messages[0].parts.map((part) => part.text).join("\n")
-    assert.match(injected, /\[milestone\] MILESTONES\/M2\.md is ready/)
+    assert.match(injected, /\[milestone\] MILESTONES\/M1\.md is ready/)
+  })
+})
+
+test("milestone: the boundary requests and waits for the next detail doc", async () => {
+  resetSessions()
+  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "auto" }, async () => {
+    const root = scratch()
+    write(root, "PLAN.md", ["### M1 — a", "### M2 — b"].join("\n"))
+    const agents = [
+      { name: "implementer", model: { providerID: "b", modelID: "flash" } },
+      { name: "reviewer", model: { providerID: "a", modelID: "big" } },
+      { name: "planner", model: { providerID: "a", modelID: "big" } },
+    ]
+    const { client, prompts } = mockClient({
+      agents,
+      onPrompt: async (entry) => {
+        if (entry.agent !== "planner") return CLEAN
+        const match = entry.text.match(/MILESTONES\/(M\d+)\.md/)
+        if (match) write(root, `MILESTONES/${match[1]}.md`, `# ${match[1]}\n`)
+        return "MILESTONE-DETAIL: ok"
+      },
+    })
+    const plugin = await Milestone({ client, directory: root })
+    await plugin.event(taskEvent("ses_parent", "implementer", "ses_i"))
+    const reply = await plugin.tool.milestone_done.execute(
+      { milestone: "M1", summary: "one" },
+      { agent: "implementer", sessionID: "ses_i" },
+    )
+    assert.match(reply, /MILESTONES\/M2\.md ready/)
+    assert.ok(
+      prompts.some((p) => p.agent === "planner" && p.text.includes("MILESTONES/M2.md")),
+    )
   })
 })
 
 test("milestone: JIT stays off when planner shares the implementer provider", async () => {
   resetSessions()
-  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "jit" }, async () => {
+  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "auto" }, async () => {
     const root = scratch()
     write(root, "PLAN.md", ["### M1 — a", "### M2 — b"].join("\n"))
     const agents = [
@@ -419,9 +663,50 @@ test("milestone: JIT stays off when planner shares the implementer provider", as
   })
 })
 
-test("milestone: JIT announcer marks planner sessions when the planner is split", async () => {
+test("milestone: explicit full disables JIT even with split providers", async () => {
+  resetSessions()
+  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "full" }, async () => {
+    const root = scratch()
+    write(root, "PLAN.md", ["### M1 — a", "### M2 — b"].join("\n"))
+    const agents = [
+      { name: "implementer", model: { providerID: "b", modelID: "flash" } },
+      { name: "reviewer", model: { providerID: "a", modelID: "big" } },
+      { name: "planner", model: { providerID: "a", modelID: "big" } },
+    ]
+    const { client, prompts } = mockClient({ agents })
+    const plugin = await Milestone({ client, directory: root })
+    await plugin.event(taskEvent("ses_parent", "implementer", "ses_i"))
+    await plugin.event(editEvent("ses_i"))
+    await flush()
+    assert.equal(prompts.filter((p) => p.agent === "planner").length, 0)
+  })
+})
+
+test("milestone: explicit jit forces detail jobs when detection is unavailable", async () => {
   resetSessions()
   await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "jit" }, async () => {
+    const root = scratch()
+    write(root, "PLAN.md", ["### M1 — a", "### M2 — b"].join("\n"))
+    const { client, prompts } = mockClient({
+      onPrompt: async (entry) => {
+        if (entry.agent === "planner") {
+          write(root, "MILESTONES/M1.md", "# M1\n")
+          return "MILESTONE-DETAIL: ok"
+        }
+        return CLEAN
+      },
+    })
+    const plugin = await Milestone({ client, directory: root })
+    await plugin.event(taskEvent("ses_parent", "implementer", "ses_i"))
+    await plugin.event(editEvent("ses_i"))
+    await flush()
+    assert.equal(prompts.filter((p) => p.agent === "planner").length, 1)
+  })
+})
+
+test("milestone: JIT announcer marks planner sessions when the planner is split", async () => {
+  resetSessions()
+  await withEnv({ OCODESA_MILESTONE: "auto", OCODESA_PLAN: "auto" }, async () => {
     const agents = [
       { name: "implementer", model: { providerID: "b", modelID: "flash" } },
       { name: "reviewer", model: { providerID: "a", modelID: "big" } },

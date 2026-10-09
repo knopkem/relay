@@ -246,6 +246,27 @@ export const Supervisor = async ({ client, directory }) => {
   // needs the gate resolves it instead.
   let watcherGate = mode === "full" || mode === "pull" ? "unknown" : "closed"
 
+  // Resolve the session's agent once via session.get so classification
+  // survives task metadata timing and renames.
+  const sessionAgentCache = new Map()
+
+  async function sessionAgent(sessionID) {
+    if (!sessionID) return null
+    if (sessionAgentCache.has(sessionID)) return sessionAgentCache.get(sessionID)
+    let agent = null
+    try {
+      const res = await client.session.get({ path: { id: sessionID } })
+      agent = res?.data?.agent ?? null
+    } catch {
+      agent = null
+    }
+    if (sessionAgentCache.size >= 256) {
+      sessionAgentCache.delete(sessionAgentCache.keys().next().value)
+    }
+    sessionAgentCache.set(sessionID, agent)
+    return agent
+  }
+
   async function resolveGate(reason) {
     if (watcherGate !== "unknown") return watcherGate
     const pair = await detectModels(client, directory)
@@ -561,13 +582,19 @@ export const Supervisor = async ({ client, directory }) => {
       const part = event.properties?.part
       if (!part || part.type !== "tool" || !part.sessionID) return
       if (part.tool === "task") {
-        const child = part.state?.metadata?.sessionID
+        const metadata = part.state?.metadata ?? {}
+        const child = metadata.sessionId ?? metadata.sessionID
         const subagent = part.state?.input?.subagent_type
         if (child && subagent === "implementer") stateFor(child).implementer = true
         return
       }
-      const state = sessions.get(part.sessionID)
-      if (!state?.implementer) return
+      let state = sessions.get(part.sessionID)
+      if (!state?.implementer) {
+        const agent = await sessionAgent(part.sessionID)
+        if (agent !== "implementer") return
+        state = stateFor(part.sessionID)
+        state.implementer = true
+      }
       const status = part.state?.status
       if (status !== "completed" && status !== "error") return
       await resolveGate("same-model")

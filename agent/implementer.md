@@ -66,7 +66,8 @@ continue with the next milestone.
 
 - Before starting a milestone, read `MILESTONES/<id>.md` when it exists: it is
   detail only — PLAN.md wins on conflict. Record a mismatch under Spec
-  deviations.
+  deviations. If it is missing, start from the milestone contract in PLAN.md;
+  the detail doc may arrive while you work.
 - When a `[reviewer]` note reports blockers, fix them now and re-run the
   affected milestone's command. Other findings go to HANDOFF.md Open items;
   do not chase them mid-milestone.

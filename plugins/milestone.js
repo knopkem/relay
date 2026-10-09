@@ -19,14 +19,16 @@
 // at a time (see serialize-task.js), so two models behind one server contend
 // just as much.
 //
-// JIT planning (OCODESA_PLAN=jit, different planner provider): PLAN.md holds
-// machine-readable milestone blocks (`### M<id> — <title>`) with frozen
-// contracts and full detail for the first milestone only; a persistent nested
-// planner session writes `MILESTONES/<id>.md` detail docs while the implementer
-// works the previous milestone. The docs are advisory — PLAN.md wins.
+// JIT planning (OCODESA_PLAN=auto|full|jit, default full): opt-in. `full`
+// writes the complete plan in one pass. `auto`/`jit` switch to contracts-only
+// PLAN.md plus on-demand `MILESTONES/<id>.md` detail docs — measured on a slow
+// thinking model, this does not reduce planning latency (the chain of thought
+// dominates) and its detail jobs compete with reviews for the same provider,
+// so it stays behind a flag. `jit` forces it when detection is unavailable.
 
 import crypto from "node:crypto"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 
 import { agentFor, withAgentTracking } from "./lib/agent-gate.js"
@@ -36,6 +38,19 @@ const PLANNER_AGENT = "planner"
 const SNAPSHOT_ROOT = path.join(".ocodesa", "review")
 const MILESTONES_DIR = "MILESTONES"
 const REVIEW_FILE = "REVIEW.md"
+
+// Injected into the planner's system prompt (and, as a fallback, as the first
+// part of its brief) so the contracts-only instruction cannot be lost at the
+// end of a long goal.
+const JIT_NOTE = [
+  "[milestone] JIT mode: format the implementation order as `### M<id> — <title>`",
+  "blocks under a `## Milestones` heading. PLAN.md is contracts only: per",
+  "milestone list files, exported symbols with exact signatures, dependencies,",
+  "and acceptance criteria — no step-by-step bodies or per-file logic. Write",
+  "only PLAN.md, AGENTS.md and PLAN-NOTES.md; never write MILESTONES/*.md — a",
+  "background session owns those and writes them on demand, starting with M1.",
+  "Keep PLAN.md compact; PLAN.md stays authoritative.",
+].join(" ")
 
 const EXCLUDED_DIRS = new Set([
   ".git",
@@ -232,6 +247,15 @@ function snapshotBase(k) {
   return /^M[A-Za-z0-9._-]/.test(k) ? k : `M${k}`
 }
 
+// A detail doc is worth writing only while its milestone is current; once the
+// builder reported that milestone's boundary the doc can never arrive in time,
+// and the good model is better spent on reviews.
+function detailStale(ids, lastBoundaryMilestone, id) {
+  const target = ids.indexOf(id)
+  const last = lastBoundaryMilestone ? ids.indexOf(lastBoundaryMilestone) : -1
+  return target >= 0 && last >= target
+}
+
 function buildSnapshot(directory, state, k) {
   const root = path.join(directory, SNAPSHOT_ROOT)
   fs.mkdirSync(root, { recursive: true })
@@ -352,10 +376,41 @@ async function detectModels(client, directory) {
   }
 }
 
+// Fallback when the agents API returns nothing usable: the rendered agent
+// frontmatter is the exact config (serialize-task.js reads it the same way).
+function configDir() {
+  if (process.env.OPENCODE_CONFIG_DIR) return process.env.OPENCODE_CONFIG_DIR
+  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config")
+  return path.join(base, "opencode")
+}
+
+function frontmatterModel(agent) {
+  try {
+    const text = fs.readFileSync(path.join(configDir(), "agent", `${agent}.md`), "utf8")
+    const match = text.match(/^model:\s*(\S+)/m)
+    if (!match) return null
+    const [provider, ...rest] = match[1].split("/")
+    if (!provider || !rest.length) return null
+    return { provider, model: rest.join("/") }
+  } catch {
+    return null
+  }
+}
+
+// The task tool part metadata moved from `sessionID` to `sessionId`; accept
+// both so task-based classification survives opencode updates.
+function taskChildID(part) {
+  const metadata = part?.state?.metadata ?? {}
+  return metadata.sessionId ?? metadata.sessionID ?? null
+}
+
 export const Milestone = async ({ client, directory }) => {
   const configured = resolveMode(process.env.OCODESA_MILESTONE)
   if (configured === "off") return {}
-  const planMode = String(process.env.OCODESA_PLAN ?? "full").toLowerCase() === "jit" ? "jit" : "full"
+  const planMode = (() => {
+    const raw = String(process.env.OCODESA_PLAN ?? "full").toLowerCase()
+    return raw === "full" || raw === "jit" ? raw : "auto"
+  })()
 
   function writeLog(entry) {
     if (!process.env.OCODESA_MILESTONE_DEBUG) return
@@ -371,24 +426,66 @@ export const Milestone = async ({ client, directory }) => {
     }
   }
 
+  writeLog({ kind: "load", mode: configured, planMode })
+
   // Provider-level gate, resolved lazily: this factory runs inside opencode's
   // bootstrap, so an API call from here would deadlock startup (see
   // supervise.js for the full story). "same" means background jobs would
   // contend with the builder; JIT needs the planner on a different provider.
   let gate = "unknown"
   let plannerSplit = null
+  // Models of the sessions actually dispatched through the task tool; the
+  // part metadata carries them, so it is the strongest source for the
+  // implementer and planner.
+  const taskModels = new Map()
+  // agent/model for sessions we did not classify through a task part, resolved
+  // once per session via session.get. Works around task metadata arriving late
+  // or being renamed between opencode versions.
+  const sessionMetaCache = new Map()
+
+  function rememberTaskModel(agent, model) {
+    if (!agent || !model?.providerID) return
+    taskModels.set(agent, {
+      provider: model.providerID,
+      model: model.modelID ?? "",
+    })
+  }
+
+  async function sessionMeta(sessionID) {
+    if (!sessionID) return null
+    if (sessionMetaCache.has(sessionID)) return sessionMetaCache.get(sessionID)
+    let meta = null
+    try {
+      const res = await client.session.get({ path: { id: sessionID } })
+      if (res?.data) meta = { agent: res.data.agent ?? null, model: res.data.model ?? null }
+    } catch {
+      meta = null
+    }
+    if (sessionMetaCache.size >= 256) {
+      sessionMetaCache.delete(sessionMetaCache.keys().next().value)
+    }
+    sessionMetaCache.set(sessionID, meta)
+    return meta
+  }
 
   async function resolveGate(reason) {
     if (gate !== "unknown") return gate
-    const models = await detectModels(client, directory)
-    if (models?.reviewer && models?.implementer) {
+    const api = await detectModels(client, directory)
+    const models = {}
+    for (const name of ["implementer", "planner", "reviewer", "verifier"]) {
+      models[name] = api?.[name] ?? frontmatterModel(name) ?? null
+    }
+    if (taskModels.has("implementer")) models.implementer = taskModels.get("implementer")
+    if (taskModels.has("planner")) models.planner = taskModels.get("planner")
+    if (models.reviewer && models.implementer) {
       gate = models.reviewer.provider === models.implementer.provider ? "same" : "split"
     } else {
       gate = "split"
     }
     plannerSplit =
-      Boolean(models?.planner && models?.implementer) &&
-      models.planner.provider !== models.implementer.provider
+      models.planner && models.implementer
+        ? models.planner.provider !== models.implementer.provider
+        : null
     if (gate === "same" && configured !== "serial") {
       writeLog({ kind: "downgrade", reason, to: "serial" })
     }
@@ -401,7 +498,11 @@ export const Milestone = async ({ client, directory }) => {
   }
 
   function jitEnabled() {
-    return planMode === "jit" && plannerSplit === true
+    if (planMode === "full") return false
+    if (plannerSplit === false) return false
+    if (plannerSplit === true) return true
+    // Detection unavailable: only an explicit `jit` overrides.
+    return planMode === "jit"
   }
 
   function readMilestoneIds(state) {
@@ -537,6 +638,10 @@ export const Milestone = async ({ client, directory }) => {
   async function runDetail(state, ownerSessionID, id) {
     const file = path.join(directory, MILESTONES_DIR, `${id}.md`)
     if (fs.existsSync(file)) return file
+    if (detailStale(readMilestoneIds(state) ?? [], state.lastBoundaryMilestone, id)) {
+      writeLog({ kind: "detail-stale", id, last: state.lastBoundaryMilestone })
+      return null
+    }
     if (!state.plannerSessionID) {
       const created = await client.session.create({
         body: { title: `milestone planner for ${ownerSessionID}`, parentID: ownerSessionID },
@@ -556,8 +661,10 @@ export const Milestone = async ({ client, directory }) => {
       "step-by-step implementation detail for this milestone only. Read PLAN.md",
       "(authoritative), HANDOFF.md and the code built so far. Refine the frozen",
       "contracts; never change signatures, wiring, or files owned by another",
-      "milestone, and write no application code. If a contract must change, write",
-      'the line "CONTRACT-ISSUE: <what>" at the top and nothing else.',
+      "milestone, and write no application code. Keep the doc compact — exact",
+      "paths, symbols and ordered steps, no prose and no restating PLAN.md. If a",
+      'contract must change, write the line "CONTRACT-ISSUE: <what>" at the top',
+      "and nothing else.",
       "Reply with exactly one line: MILESTONE-DETAIL: ok",
     ].join("\n")
     try {
@@ -613,10 +720,11 @@ export const Milestone = async ({ client, directory }) => {
   function maybeQueueDetail(state, ownerSessionID) {
     if (!jitEnabled()) return
     const ids = readMilestoneIds(state)
-    if (!ids || ids.length < 2) return
+    if (!ids || !ids.length) return
     const last = state.lastBoundaryMilestone
-    const currentIndex = last ? Math.max(0, ids.indexOf(last) + 1) : 0
-    const next = ids[currentIndex + 1]
+    // Before the first boundary the current milestone itself gets a detail
+    // doc; afterwards the doc for the milestone after the current one.
+    const next = last ? ids[ids.indexOf(last) + 2] : ids[0]
     if (!next) return
     if (fs.existsSync(path.join(directory, MILESTONES_DIR, `${next}.md`))) return
     queueDetailJob(state, ownerSessionID, next)
@@ -791,12 +899,16 @@ export const Milestone = async ({ client, directory }) => {
       const part = event.properties?.part
       if (!part || part.type !== "tool" || !part.sessionID) return
       if (part.tool === "task") {
-        const child = part.state?.metadata?.sessionID
+        const child = taskChildID(part)
         const subagent = part.state?.input?.subagent_type
+        const model = part.state?.metadata?.model
+        rememberTaskModel(subagent, model)
         if (child && subagent === "implementer") {
           const state = stateFor(child)
           state.implementer = true
           if (!state.lastBoundaryAt) state.lastBoundaryAt = Date.now()
+          await resolveGate("implementer-start")
+          maybeQueueDetail(state, child)
         }
         if (child && subagent === "planner") {
           if (plannerSessions.size >= 64) {
@@ -806,8 +918,18 @@ export const Milestone = async ({ client, directory }) => {
         }
         return
       }
-      const state = sessions.get(part.sessionID)
-      if (!state?.implementer) return
+
+      let state = sessions.get(part.sessionID)
+      if (!state?.implementer) {
+        const meta = await sessionMeta(part.sessionID)
+        if (meta?.agent === PLANNER_AGENT) plannerSessions.add(part.sessionID)
+        if (meta?.agent !== "implementer") return
+        state = stateFor(part.sessionID)
+        state.implementer = true
+        if (!state.lastBoundaryAt) state.lastBoundaryAt = Date.now()
+        await resolveGate("implementer-start")
+        maybeQueueDetail(state, part.sessionID)
+      }
       if (part.state?.status !== "completed") return
 
       if (part.tool !== "edit" && part.tool !== "write" && part.tool !== "apply_patch") return
@@ -820,6 +942,34 @@ export const Milestone = async ({ client, directory }) => {
       maybeQueueDetail(state, part.sessionID)
     },
 
+    // The system prompt is the reliable channel for the JIT directive: it sits
+    // next to the planner instructions instead of at the end of a possibly
+    // enormous goal text, and it needs no session bookkeeping to detect the
+    // role — the planner's own prompt says "You are the **planner**".
+    "experimental.chat.system.transform": async (input, output) => {
+      if (planMode === "full") return
+      const sessionID = input?.sessionID
+      const system = output?.system
+      if (!sessionID || !Array.isArray(system)) return
+      if (jitAnnounced.has(sessionID) || detailSessions.has(sessionID)) return
+      const isPlanner =
+        agentFor(sessionID) === PLANNER_AGENT ||
+        plannerSessions.has(sessionID) ||
+        system.some((text) => String(text ?? "").includes("You are the **planner**"))
+      writeLog({
+        kind: "system-transform",
+        sessionID,
+        isPlanner,
+        agent: agentFor(sessionID) ?? null,
+        taskPlanner: plannerSessions.has(sessionID),
+      })
+      if (!isPlanner) return
+      await resolveGate("jit-system")
+      jitAnnounced.add(sessionID)
+      writeLog({ kind: "jit-announce", channel: "system", sessionID, planMode, plannerSplit })
+      if (plannerSplit === true) system.push(JIT_NOTE)
+    },
+
     "experimental.chat.messages.transform": async (_input, output) => {
       const messages = output?.messages ?? []
       const sessionID = messages[0]?.info?.sessionID
@@ -827,26 +977,41 @@ export const Milestone = async ({ client, directory }) => {
       const lastUser = [...messages].reverse().find((msg) => msg.info?.role === "user")
       if (!lastUser) return
 
-      if (
-        planMode === "jit" &&
-        !jitAnnounced.has(sessionID) &&
-        !detailSessions.has(sessionID) &&
-        (agentFor(sessionID) === PLANNER_AGENT || plannerSessions.has(sessionID))
-      ) {
-        await resolveGate("jit-announce")
-        jitAnnounced.add(sessionID)
-        if (plannerSplit === true) {
-          lastUser.parts.push({
-            type: "text",
-            synthetic: true,
-            text: [
-              "[milestone] JIT mode: format the implementation order as `### M<id> — <title>`",
-              "blocks under a `## Milestones` heading. Keep full file-by-file detail for",
-              "the first milestone only; later milestones are frozen contracts (files,",
-              "exact signatures, dependencies, acceptance criteria). A background session",
-              "writes `MILESTONES/<id>.md` detail docs on demand; PLAN.md stays authoritative.",
-            ].join(" "),
-          })
+      if (planMode === "full" || jitAnnounced.has(sessionID) || detailSessions.has(sessionID)) {
+        // fall through to note injection
+      } else {
+        // The message payload carries the agent for its own session; the other
+        // sources cover builds where it is missing. The brief text is the last
+        // resort: the orchestrator's P/P2 brief always says "Write PLAN.md".
+        const messageAgent = lastUser.info?.agent ?? messages[0]?.info?.agent ?? null
+        const brief = lastUser.parts
+          .map((part) => (part?.type === "text" ? String(part.text ?? "") : ""))
+          .join("\n")
+        const briefPlanner = /Write PLAN\.md/.test(brief)
+        const meta = await sessionMeta(sessionID)
+        const known =
+          messageAgent === PLANNER_AGENT ||
+          agentFor(sessionID) === PLANNER_AGENT ||
+          plannerSessions.has(sessionID) ||
+          meta?.agent === PLANNER_AGENT ||
+          briefPlanner
+        writeLog({
+          kind: "transform",
+          sessionID,
+          messageAgent,
+          agent: agentFor(sessionID) ?? null,
+          taskPlanner: plannerSessions.has(sessionID),
+          metaAgent: meta?.agent ?? null,
+          briefPlanner,
+          known,
+        })
+        if (known) {
+          await resolveGate("jit-announce")
+          jitAnnounced.add(sessionID)
+          writeLog({ kind: "jit-announce", channel: "messages", sessionID, planMode, plannerSplit })
+          if (plannerSplit === true) {
+            lastUser.parts.unshift({ type: "text", synthetic: true, text: JIT_NOTE })
+          }
         }
       }
 
@@ -875,6 +1040,10 @@ Milestone.__test = {
   collectText,
   firstLine,
   describeError,
+  agentModels,
+  frontmatterModel,
+  taskChildID,
+  detailStale,
   setTimings: (values) => Object.assign(TIMINGS, values),
   setLimits: (values) => Object.assign(LIMITS, values),
   resetSessions: () => {

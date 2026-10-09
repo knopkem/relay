@@ -246,6 +246,47 @@ test("supervise: task-tool implementer children classify and get advisories", as
   })
 })
 
+test("supervise: classifies via the renamed sessionId task metadata", async () => {
+  await withMode("full", async () => {
+    const { client, gets } = mockClient()
+    const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    await plugin.event({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            type: "tool",
+            tool: "task",
+            sessionID: "ses_parent",
+            state: {
+              status: "completed",
+              input: { subagent_type: "implementer" },
+              metadata: { sessionId: "sup_renamed" },
+            },
+          },
+        },
+      },
+    })
+    for (let i = 0; i < 15; i += 1) await plugin.event(toolEvent("sup_renamed"))
+    assert.deepEqual(gets, [])
+    const output = userTurn("sup_renamed")
+    await plugin["experimental.chat.messages.transform"]({}, output)
+    assert.match(output.messages[0].parts[0].text, /15\+ edits/)
+  })
+})
+
+test("supervise: falls back to session.get when no task part classifies", async () => {
+  await withMode("full", async () => {
+    const { client, gets } = mockClient()
+    const plugin = await Supervisor({ client, directory: os.tmpdir() })
+    for (let i = 0; i < 15; i += 1) await plugin.event(toolEvent("sup_fallback"))
+    assert.ok(gets.includes("sup_fallback"))
+    const output = userTurn("sup_fallback")
+    await plugin["experimental.chat.messages.transform"]({}, output)
+    assert.match(output.messages[0].parts[0].text, /15\+ edits/)
+  })
+})
+
 test("supervise: ask_supervisor gates on agent and reaches the watcher", async () => {
   await withMode("full", async () => {
     const { client, prompts } = mockClient()

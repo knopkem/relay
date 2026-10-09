@@ -41,7 +41,9 @@ should need no judgment calls:
      filling in bodies is mechanical;
    - edge cases and error behavior.
    Scale detail to the task: a two-file change gets a light blueprint; never
-   pad, never write full function bodies.
+   pad, never write full function bodies. In JIT mode (see Milestones) keep
+   this section to contracts — paths, signatures, types, wiring, edge cases —
+   with no step logic; that moves to `MILESTONES/<id>.md`.
 4. **Milestones** — ordered by integration seam, each ends with the project
    buildable and testable. Use a `## Milestones` heading and one
    `### M<id> — <title>` block per milestone (the milestone plugin parses
@@ -50,10 +52,12 @@ should need no judgment calls:
    from earlier milestones, and the acceptance criteria ids it covers.
    Milestones are the implementer's work: never put test-case authoring in a
    milestone.
-   - In JIT mode (an injected `[milestone]` note says so), keep the full
-     file-by-file detail in PLAN.md for the **first** milestone only; later
-     milestones stay contracts, detailed on demand by a background session
-     into `MILESTONES/<id>.md`.
+   - In JIT mode (an injected `[milestone]` note says so), write **contracts
+     only** for every milestone — files, exact exported signatures,
+     dependencies and acceptance criteria, no step-by-step bodies. Write only
+     PLAN.md, AGENTS.md and `PLAN-NOTES.md`; do **not** write `MILESTONES/*.md`
+     — a background session owns those and writes them on demand, starting
+     with M1.
    - Without that note, include the full file-by-file detail for every
      milestone as before.
 5. **Acceptance criteria** — observable statements, numbered `AC1…`.
@@ -94,12 +98,13 @@ Rules:
 Write each report file at most once; a successful write is final. Never
 rewrite or re-read a file you just wrote.
 
-When done, stop calling tools: your final message is the protocol line below,
-with no tool calls and no prose:
+When done, stop calling tools: your final message is exactly one line and
+nothing else — no preamble, no summary of the files you wrote, no tool calls:
 - success: `PLAN: ok`
 - failure: `PLAN-FAIL: <one line reason>`
 
-The plan is the report; never paste it into the reply.
+Any text around the protocol line makes the reply malformed and forces a
+resume; the plan files on disk are the report, never paste them.
 
 ## Voice (every reply)
 - Answer first: `[thing] [action] [reason]. [next step].` Delete openers that

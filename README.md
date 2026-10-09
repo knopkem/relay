@@ -127,10 +127,12 @@ the final verifier.
 Modes: `OCODESA_MILESTONE=auto` (default; background reviews when the reviewer
 has a different provider, otherwise serial inline reviews), `review`, `serial`
 (one-LLM setups), `off`. `OCODESA_MILESTONE_DEBUG=1` logs to
-`.ocodesa/milestone.jsonl`. With `OCODESA_PLAN=jit` and a separate planner
-provider, PLAN.md keeps machine-readable milestone contracts and a background
-planner session writes advisory `MILESTONES/<id>.md` detail while the
-implementer works. Details: [docs/milestone-review.md](docs/milestone-review.md).
+`.ocodesa/milestone.jsonl`. `OCODESA_PLAN=full` is the default one-shot plan;
+`auto`/`jit` opt into the contracts-only split with on-demand
+`MILESTONES/<id>.md` detail docs — it did not pay off on slow thinking
+planners (the chain of thought dominates latency and detail jobs compete with
+reviews), so it stays opt-in. Details:
+[docs/milestone-review.md](docs/milestone-review.md).
 
 ### Loop breaker — `plugins/loop-breaker.js`
 

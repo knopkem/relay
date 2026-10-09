@@ -44,6 +44,9 @@ else:
 - audit verifier: `AUDIT: pass` | `AUDIT: fail`
 - verifier in fix mode: `FIXED: ok` | `BLOCKED: <reason>`
 
+Match ignoring spaces after the colon: `PLAN:ok` and `IMPL:ok` count as
+`PLAN: ok` and `IMPL: ok`. Everything else about the line must match exactly.
+
 If no expected prefix appears, the child was interrupted, not finished: resume
 it **once** with the K brief for its family (below), using its saved
 `task_id`, then parse the resumed reply. If that reply is also malformed, stop

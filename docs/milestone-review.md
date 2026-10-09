@@ -75,7 +75,7 @@ The reviewer appends findings to `REVIEW.md` as `## milestone <id>` sections
 ## Modes
 
 `OCODESA_MILESTONE=auto|off|review|serial` (default `auto`) and
-`OCODESA_PLAN=full|jit` (default `full`).
+`OCODESA_PLAN=auto|full|jit` (default `full`).
 
 | Setup | Resolved behavior |
 |---|---|
@@ -93,18 +93,23 @@ during opencode's bootstrap and must not call the API (see
 `OCODESA_MILESTONE_DEBUG=1` appends JSONL events (boundaries, reviews, detail
 jobs, downgrades, injections) to `.ocodesa/milestone.jsonl`.
 
-## JIT planning (`OCODESA_PLAN=jit`)
+## JIT planning (`OCODESA_PLAN=auto|full|jit`, default `full`)
 
-PLAN.md formats its implementation order as machine-readable blocks
-(`### M<id> — <title>` under `## Milestones`) with frozen contracts per
-milestone, and keeps full file-by-file detail for the first milestone only.
-While the implementer works a milestone, a persistent nested planner session
-writes `MILESTONES/<id>.md` for the next one (triggered by the first edit
-after a boundary; finished on demand at the boundary if late). The docs are
-**advisory — PLAN.md wins**, and a contract that must change is flagged with
-`CONTRACT-ISSUE:` instead of silently drifting, so a weak detail doc can only
-cost tokens, never correctness. A `PLAN-NOTES.md` ledger (one line per design
-decision) seeds the planner if its session ever restarts.
+Opt-in, off by default. `auto` (and `jit`) switch PLAN.md to contracts only —
+machine-readable blocks (`### M<id> — <title>` under `## Milestones`) listing
+files, exact signatures, dependencies and acceptance criteria per milestone —
+and a persistent nested planner session writes `MILESTONES/<id>.md` detail docs
+on demand. The docs are **advisory — PLAN.md wins**, and a contract that must
+change is flagged with `CONTRACT-ISSUE:` instead of silently drifting. A
+`PLAN-NOTES.md` ledger (one line per design decision) seeds the planner if its
+session ever restarts.
+
+Measured with a slow, thinking-heavy planner, the split **does not reduce
+planning latency** — the chain of thought dominates, not the output size — and
+the detail jobs compete with milestone reviews for the same provider. It stays
+behind a flag: `full` writes the complete plan in one pass and frees the good
+model for reviews during the build; `jit` forces the split even when provider
+detection is unavailable.
 
 ## Watcher interplay
 
