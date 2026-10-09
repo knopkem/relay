@@ -16,6 +16,12 @@
 // rejected, and the first locked attempt aborts the session via the client
 // so an ignoring model cannot spin forever.
 //
+// The ratchet lock is blind to a model that hammers one blocked call: reads
+// and the planner never ratchet, so 25 identical retries of a failed webfetch
+// can spin forever. Repeating one blocked fingerprint BLOCKED_RETRY_LIMIT
+// times without a different successful call in between locks the session on
+// its own, whatever the tool and role.
+//
 // Only ocodesa-role sessions are guarded (see lib/agent-gate.js).
 //
 // Rules that keep the guard fair to each role:
@@ -23,18 +29,22 @@
 //     other call (read, search, bash, task) resets it, so investigating a
 //     failed edit is never punished, and a read is never blocked by it;
 //   - an aborted call is remembered: repeating it is rejected immediately,
-//     until a different call succeeds;
+//     until a different call succeeds; after BLOCKED_RETRY_LIMIT such
+//     rejections the session is locked and aborted, so a model that ignores
+//     the block cannot spin forever;
 //   - the words of an abort fit the role: only roles with shell access are
 //     told to run the project's checks, and only the role that owns a report
 //     file is told to update it;
-//   - the abort ratchet and the session lock apply only to roles that can
-//     run commands (RATCHET_AGENTS) and only to write-like actions; a
-//     read-only repeat (read, grep, glob, cat, …) is rejected like any other
-//     repeat but never ratchets, so a blocked inspection can never lock the
-//     session by itself;
-//   - a fingerprint aborts at most once per session: retrying a blocked call
-//     stays blocked forever but never counts as a new abort, so a stubborn
-//     model on one command cannot walk the session into the lock.
+//   - the abort ratchet applies only to roles that can run commands
+//     (RATCHET_AGENTS) and only to write-like actions; a read-only repeat
+//     (read, grep, glob, cat, …) is rejected like any other repeat but never
+//     ratchets, so a blocked inspection can never reach the ratchet lock by
+//     itself; it reaches the blocked-retry lock only if the model ignores
+//     the block;
+//   - a fingerprint aborts at most once per session toward the ratchet:
+//     retrying a blocked call stays blocked forever but never counts as a new
+//     abort, so a stubborn model on one command cannot walk the session into
+//     the ratchet lock.
 
 import { agentFor, forgetAgent, isOcodesaSession, withAgentTracking } from "./lib/agent-gate.js"
 
@@ -42,6 +52,7 @@ const SAME_ACTION_LIMIT = 3
 const RESULT_REPEAT_LIMIT = 3
 const EDIT_RUN_LIMIT = 5
 const TRIP_LIMIT = 5
+const BLOCKED_RETRY_LIMIT = 3
 const MAX_SESSIONS = 64
 const MAX_RESULTS = 32
 const MAX_COUNTED = 256
@@ -50,7 +61,8 @@ const MAX_COUNTED = 256
 const RATCHET_AGENTS = new Set(["implementer", "verifier", "orchestrator"])
 
 // Read-only calls are blocked like any other repeat but never ratchet toward
-// the lock: an inspection loop must not be able to end the run.
+// the lock: an inspection loop must not be able to end the run on its own —
+// only by ignoring the block BLOCKED_RETRY_LIMIT times.
 const READ_ONLY_TOOLS = new Set(["read", "grep", "glob", "list", "webfetch"])
 const READ_ONLY_COMMANDS =
   /^\s*(?:grep|rg|ag|cat|bat|head|tail|nl|tac|ls|find|file|stat|wc|diff|jq|tree|du|df|which|pwd|echo|env|printenv|realpath|readlink|basename|dirname|git\s+(?:status|log|diff|show|branch|remote|describe|rev-parse))\b/
@@ -97,9 +109,11 @@ function stateFor(sessionID) {
       lastFile: "",
       editRun: 0,
       blocked: new Set(),
+      blockRetries: new Map(),
       counted: new Set(),
       trips: 0,
       locked: false,
+      lockNote: "",
       aborted: false,
     }
     sessions.set(sessionID, state)
@@ -186,10 +200,11 @@ function fingerprintOf(tool, args) {
 // Record an abort and return the error to throw. The aborted fingerprint is
 // remembered so an immediate retry is rejected too. A fingerprint counts as
 // one abort per session, and read-only calls never count, so hammering the
-// same command stays blocked but cannot walk the session into the lock. Once
-// a ratcheted session reaches TRIP_LIMIT aborts it is locked and the message
-// tells the model how to end. Roles without shell access cannot satisfy the
-// guard's remedy, so they are blocked call by call but never locked.
+// same command stays blocked but cannot walk the session into the ratchet
+// lock. Once a ratcheted session reaches TRIP_LIMIT aborts it is locked and
+// the message tells the model how to end. Roles without shell access cannot
+// satisfy the guard's remedy, so they are blocked call by call; if they keep
+// ignoring the block, the blocked-retry limit locks the session anyway.
 function trip(state, fingerprint, message, agent, { ratchet = true } = {}) {
   state.blocked.add(fingerprint)
   if (!ratchet || !RATCHET_AGENTS.has(agent)) return new Error(message)
@@ -201,6 +216,7 @@ function trip(state, fingerprint, message, agent, { ratchet = true } = {}) {
   state.trips += 1
   if (state.trips < TRIP_LIMIT) return new Error(message)
   state.locked = true
+  state.lockNote = `${state.trips} aborted calls`
   return new Error(
     `${message} — ${state.trips} aborted calls in this session; it is now locked. Stop calling tools and reply with your blocker, e.g. "BLOCKED: <reason>".`,
   )
@@ -234,11 +250,24 @@ export const LoopBreaker = async ({ client } = {}) => {
           await abortSession(sessionID)
         }
         throw new Error(
-          `Loop breaker: session locked after ${state.trips} aborted calls — tools are disabled. Reply with your blocker now, e.g. "BLOCKED: <reason>".`,
+          `Loop breaker: session locked after ${state.lockNote || `${state.trips} aborted calls`} — tools are disabled. Reply with your blocker now, e.g. "BLOCKED: <reason>".`,
         )
       }
 
       if (state.blocked.has(fp)) {
+        const retries = (state.blockRetries.get(fp) ?? 0) + 1
+        state.blockRetries.set(fp, retries)
+        if (retries >= BLOCKED_RETRY_LIMIT) {
+          state.locked = true
+          state.lockNote = `${retries} repeated attempts to call blocked "${labelFor(tool, args)}"`
+          if (!state.aborted) {
+            state.aborted = true
+            await abortSession(sessionID)
+          }
+          throw new Error(
+            `Loop breaker: "${labelFor(tool, args)}" was blocked and has now been retried ${retries} times — the session is locked. Stop calling tools and reply with your blocker, e.g. "BLOCKED: <reason>".`,
+          )
+        }
         throw trip(
           state,
           fp,
@@ -290,6 +319,7 @@ export const LoopBreaker = async ({ client } = {}) => {
       }
 
       state.blocked.clear()
+      state.blockRetries.clear()
     },
     "tool.execute.after": async (input, output) => {
       if (!isOcodesaSession(input?.sessionID)) return
@@ -328,6 +358,7 @@ LoopBreaker.__test = {
   RESULT_REPEAT_LIMIT,
   EDIT_RUN_LIMIT,
   TRIP_LIMIT,
+  BLOCKED_RETRY_LIMIT,
   normalizeCommand,
   normalizeOutput,
   fingerprintOf,

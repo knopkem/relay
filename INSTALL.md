@@ -100,8 +100,5 @@ the implementer calls `milestone_done` at each milestone boundary and a
 read-only reviewer inspects a frozen snapshot. `OCODESA_MILESTONE=off`
 disables it, `serial` forces inline reviews, `review` prefers background
 reviews, and `auto` (default) picks serial when the reviewer shares the
-implementer's provider. `OCODESA_PLAN=full` is the default one-shot plan;
-`OCODESA_PLAN=auto|jit` opts into the contracts-only split with on-demand
-`MILESTONES/<id>.md` detail docs (kept off by default: on slow thinking
-planners it does not reduce plan latency and competes with reviews). Details:
+implementer's provider. Details:
 [docs/milestone-review.md](docs/milestone-review.md).

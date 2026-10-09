@@ -80,7 +80,7 @@ and task ids — never `PLAN.md`, `HANDOFF.md` or `ISSUES.md`.
 | Agent | Mode | Model | Role |
 |---|---|---|---|
 | `orchestrator` | primary | own role | Zero-read router: parses one-line protocol replies and follows the state machine. Never reads artifacts or code; never edits. `read`/`bash` allowed for Zen free-tier compatibility. |
-| `planner` | subagent | good | Writes the blueprint (`PLAN.md`) with exact signatures, step logic, wiring, edge cases, acceptance criteria and a test plan; creates `AGENTS.md` only if missing. Replies `PLAN: ok`. |
+| `planner` | subagent | good | Writes the blueprint (`PLAN.md`) with exact signatures, step logic, wiring, edge cases, acceptance criteria and a test plan; grounds established domains from sources (`webfetch`/`websearch`); creates `AGENTS.md` only if missing. Replies `PLAN: ok`. |
 | `implementer` | subagent | fast | Fills in the entire blueprint in one session, writes `HANDOFF.md`. Never redesigns interfaces, never writes tests, never uses git. Resumed for fixes (`ISSUES.md`); replies `IMPL: ok` / `BLOCKED`. |
 | `verifier` | subagent | = planner | Fresh session: tests from the plan first, then spec/quality review, then fixes small/medium findings itself, appending everything to `ISSUES.md`. Re-check, audit (read-only) and fix modes. Replies `VERIFY` / `AUDIT` / `FIXED`. |
 | `watcher` | subagent | = verifier | Read-only supervisor for the running implementer. Answers `ask_supervisor` with ≤2 sentences of direction, and powers the passive advisories. Never edits. |
@@ -127,12 +127,19 @@ the final verifier.
 Modes: `OCODESA_MILESTONE=auto` (default; background reviews when the reviewer
 has a different provider, otherwise serial inline reviews), `review`, `serial`
 (one-LLM setups), `off`. `OCODESA_MILESTONE_DEBUG=1` logs to
-`.ocodesa/milestone.jsonl`. `OCODESA_PLAN=full` is the default one-shot plan;
-`auto`/`jit` opt into the contracts-only split with on-demand
-`MILESTONES/<id>.md` detail docs — it did not pay off on slow thinking
-planners (the chain of thought dominates latency and detail jobs compete with
-reviews), so it stays opt-in. Details:
+`.ocodesa/milestone.jsonl`. Details:
 [docs/milestone-review.md](docs/milestone-review.md).
+
+### Grounded planning — planner prompt
+
+When the request names an established domain (a game, protocol, spec,
+standard), the planner pins the target edition/version and inventories its
+rules in an `## Interpretation` section, checking each load-bearing rule
+against a fetched source instead of memory (`webfetch`/`websearch` allowed;
+primary sources first). Rules it cannot source are marked `UNSOURCED` and
+never become acceptance criteria silently. Core acceptance criteria need
+concrete input→output examples, so a superficially working implementation
+cannot pass review.
 
 ### Loop breaker — `plugins/loop-breaker.js`
 
@@ -142,7 +149,11 @@ model cannot loop indefinitely. Aborts accumulate per session: after 5 aborts
 the session is locked (every tool call is rejected with an instruction to reply
 `BLOCKED`), and the first call after the lock also aborts the session via the
 client, so a model that ignores the errors is stopped instead of spinning.
-Thresholds are constants at the top of the file.
+Only command-running roles ratchet toward that lock and read-only aborts never
+count toward it, so a single blocked call is instead capped on its own: after
+3 retries of the same blocked call without a different successful call in
+between the session locks and aborts too — even for a planner stuck on one
+failed `webfetch`. Thresholds are constants at the top of the file.
 
 ### Write guard — `plugins/write-guard.js`
 

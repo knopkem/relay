@@ -20,9 +20,8 @@ before changing behavior.
 - `command/*.md` — slash commands (`/pipeline`).
 - `plugins/supervise.js` — `ask_supervisor`, canned advisories, prereview.
 - `plugins/milestone.js` — `milestone_done` boundary tool, frozen snapshots,
-  background or serial `reviewer` sessions, `REVIEW.md`, JIT detail jobs
-  (`OCODESA_MILESTONE=auto|off|review|serial`, `OCODESA_PLAN=full|auto|jit`,
-  plan split off by default).
+  background or serial `reviewer` sessions, `REVIEW.md`
+  (`OCODESA_MILESTONE=auto|off|review|serial`).
 - `plugins/loop-breaker.js`, `plugins/write-guard.js`,
   `plugins/serialize-task.js`, `plugins/compaction-ledger.js` — guards; keep
   their behavior intact. They act only in ocodesa agent sessions, resolved by

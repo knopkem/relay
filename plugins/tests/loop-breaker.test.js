@@ -92,17 +92,30 @@ test("loop breaker: a blocked call is rejected immediately when repeated", async
   await before(plugin, input, args)
 })
 
-test("loop breaker: retrying one blocked fingerprint never locks the session", async () => {
-  const plugin = await LoopBreaker()
+test("loop breaker: ignoring a block locks the session and aborts it once", async () => {
+  const aborts = []
+  const plugin = await LoopBreaker({
+    client: {
+      session: {
+        abort: async (options) => {
+          aborts.push(options)
+        },
+      },
+    },
+  })
   const input = { tool: "bash", sessionID: "lb_reblock" }
   const args = { command: "npm test" }
   await before(plugin, input, args)
   await before(plugin, input, args)
   await assert.rejects(() => before(plugin, input, args), /ran 3 times/)
-  for (let i = 0; i < LoopBreaker.__test.TRIP_LIMIT + 3; i += 1) {
+  for (let i = 1; i < LoopBreaker.__test.BLOCKED_RETRY_LIMIT; i += 1) {
     await assert.rejects(() => before(plugin, input, args), /was just blocked/)
+    assert.equal(aborts.length, 0)
   }
-  await before(plugin, { tool: "bash", sessionID: "lb_reblock" }, { command: "fresh-idea" })
+  await assert.rejects(() => before(plugin, input, args), /locked/)
+  assert.deepEqual(aborts, [{ path: { id: "lb_reblock" } }])
+  await assert.rejects(() => before(plugin, input, args), /tools are disabled/)
+  assert.equal(aborts.length, 1)
 })
 
 test("loop breaker: read-only commands are blocked but never ratchet toward the lock", async () => {
@@ -115,6 +128,34 @@ test("loop breaker: read-only commands are blocked but never ratchet toward the 
     await assert.rejects(() => before(plugin, input, args), /ran 3 times/)
   }
   await before(plugin, { tool: "bash", sessionID: "lb_readonly" }, { command: "fresh-idea" })
+})
+
+test("loop breaker: a planner ignoring a blocked webfetch locks the session", async () => {
+  const aborts = []
+  const plugin = await LoopBreaker({
+    client: {
+      session: {
+        abort: async (options) => {
+          aborts.push(options)
+        },
+      },
+    },
+  })
+  rememberAgent("lb_webfetch", "planner")
+  const input = { tool: "webfetch", sessionID: "lb_webfetch" }
+  const args = { format: "markdown", url: "https://www.boulderdash.nl/" }
+  const call = () => plugin["tool.execute.before"](input, { args })
+  await call()
+  await call()
+  await assert.rejects(call, /ran 3 times/)
+  for (let i = 1; i < LoopBreaker.__test.BLOCKED_RETRY_LIMIT; i += 1) {
+    await assert.rejects(call, /was just blocked/)
+    assert.equal(aborts.length, 0)
+  }
+  await assert.rejects(call, /locked/)
+  assert.deepEqual(aborts, [{ path: { id: "lb_webfetch" } }])
+  await assert.rejects(call, /tools are disabled/)
+  assert.equal(aborts.length, 1)
 })
 
 test("loop breaker: the implementer edit-run abort asks for checks and HANDOFF.md", async () => {
@@ -156,7 +197,7 @@ test("loop breaker: the planner edit-run abort asks for one whole-file write", a
   )
 })
 
-test("loop breaker: the planner is never locked and never aborts the session", async () => {
+test("loop breaker: distinct planner aborts never ratchet toward the lock", async () => {
   const aborts = []
   const plugin = await LoopBreaker({
     client: {

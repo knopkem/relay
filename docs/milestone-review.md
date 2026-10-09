@@ -74,13 +74,12 @@ The reviewer appends findings to `REVIEW.md` as `## milestone <id>` sections
 
 ## Modes
 
-`OCODESA_MILESTONE=auto|off|review|serial` (default `auto`) and
-`OCODESA_PLAN=auto|full|jit` (default `full`).
+`OCODESA_MILESTONE=auto|off|review|serial` (default `auto`).
 
 | Setup | Resolved behavior |
 |---|---|
-| reviewer provider ≠ implementer provider | background reviews; JIT enabled when the planner is also on another provider |
-| reviewer provider = implementer provider | serial inline reviews; JIT stays off |
+| reviewer provider ≠ implementer provider | background reviews |
+| reviewer provider = implementer provider | serial inline reviews |
 | `OCODESA_MILESTONE=review` on the same provider | downgraded to serial, logged |
 | `off` | plugin inert |
 | detection fails | configured mode kept, logged |
@@ -90,26 +89,8 @@ first edit or `milestone_done` call — never in the plugin factory, which runs
 during opencode's bootstrap and must not call the API (see
 `supervision-v2.md`).
 
-`OCODESA_MILESTONE_DEBUG=1` appends JSONL events (boundaries, reviews, detail
-jobs, downgrades, injections) to `.ocodesa/milestone.jsonl`.
-
-## JIT planning (`OCODESA_PLAN=auto|full|jit`, default `full`)
-
-Opt-in, off by default. `auto` (and `jit`) switch PLAN.md to contracts only —
-machine-readable blocks (`### M<id> — <title>` under `## Milestones`) listing
-files, exact signatures, dependencies and acceptance criteria per milestone —
-and a persistent nested planner session writes `MILESTONES/<id>.md` detail docs
-on demand. The docs are **advisory — PLAN.md wins**, and a contract that must
-change is flagged with `CONTRACT-ISSUE:` instead of silently drifting. A
-`PLAN-NOTES.md` ledger (one line per design decision) seeds the planner if its
-session ever restarts.
-
-Measured with a slow, thinking-heavy planner, the split **does not reduce
-planning latency** — the chain of thought dominates, not the output size — and
-the detail jobs compete with milestone reviews for the same provider. It stays
-behind a flag: `full` writes the complete plan in one pass and frees the good
-model for reviews during the build; `jit` forces the split even when provider
-detection is unavailable.
+`OCODESA_MILESTONE_DEBUG=1` appends JSONL events (boundaries, reviews,
+downgrades, injections) to `.ocodesa/milestone.jsonl`.
 
 ## Watcher interplay
 
