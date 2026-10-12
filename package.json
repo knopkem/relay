@@ -1,0 +1,11 @@
+{
+  "name": "relay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test plugins/tests/*.test.js"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.27"
+  }
+}
