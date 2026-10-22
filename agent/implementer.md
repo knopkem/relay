@@ -4,6 +4,7 @@ description: >-
   session, writes its handoff to HANDOFF.md, and reports one protocol line.
   Never redesigns interfaces, never writes tests, never uses git.
 mode: subagent
+hidden: true
 model: __IMPLEMENTER_MODEL__
 # __IMPLEMENTER_OPTIONS__
 temperature: 0.1

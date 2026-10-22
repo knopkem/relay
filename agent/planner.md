@@ -4,6 +4,7 @@ description: >-
   implementation blueprint (PLAN.md) with a test plan, plus a tailored
   AGENTS.md when the project has none. Docs only — never application code.
 mode: subagent
+hidden: true
 model: __PLANNER_MODEL__
 temperature: 0.6
 # __PLANNER_OPTIONS__

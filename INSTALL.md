@@ -58,14 +58,17 @@ This example uses the V1 `agent`/`permission` config shape. OpenCode V2
 continues to accept supported V1 config and agent/command directories; in the
 native V2 permission shape, action `task` is named `subagent`.
 
-OpenCode lists every installed subagent whose `task`/`subagent` permission is
-not denied to the calling agent. The rendered `planner`, `implementer`,
-`verifier` and `watcher` are therefore visible to ordinary `build` and `plan`
-sessions, and a strong model may dispatch the pipeline on its own. Deny
-`task` (or V2-native `subagent`) for those four names in both agents in your
-global `opencode.jsonc` (merge with your existing `build`/`plan` blocks);
-OpenCode then drops them from the task description and the pipeline only
-starts via `/pipeline`:
+The four subagents render with `hidden: true`. In OpenCode V2 that removes
+them from the subagent catalog every session sees, so ordinary `build` and
+`plan` sessions only list `general` and `explore` and keep their own
+workflow. Hidden is visibility, not security: the orchestrator still dispatches
+`planner`, `implementer`, `verifier` and `watcher` by ID, so `/pipeline` is
+unaffected.
+
+For V1, where `hidden` only hides agents from the `@` menu, add belt-and-braces
+denies in your global `opencode.jsonc`. Deny `task` (or V2-native `subagent`)
+for those four names in both agents (merge with your existing blocks); OpenCode
+then drops them from the task description too:
 
 ```jsonc
 "agent": {
@@ -74,9 +77,7 @@ starts via `/pipeline`:
 }
 ```
 
-The orchestrator keeps its own allow-list, so `/pipeline` is unaffected.
-`hidden: true` on the subagents does not help: hidden agents remain invocable
-via the task tool.
+The orchestrator keeps its own allow-list, so this does not block `/pipeline`.
 
 ## Applying model changes
 

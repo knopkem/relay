@@ -5,6 +5,7 @@ description: >-
   logs everything to ISSUES.md. Rewrite-scale blockers go back to the
   implementer. Audit mode is read-only.
 mode: subagent
+hidden: true
 model: __VERIFIER_MODEL__
 # __VERIFIER_OPTIONS__
 temperature: 0.3

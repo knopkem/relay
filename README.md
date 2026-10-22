@@ -91,6 +91,11 @@ and task ids — never `PLAN.md`, `HANDOFF.md` or `ISSUES.md`.
 | `verifier` | subagent | = planner | Fresh session: tests from the plan first, then spec/quality review, then fixes small/medium findings itself, appending everything to `ISSUES.md`. Re-check, audit (read-only) and fix modes. Replies `VERIFY` / `AUDIT` / `FIXED`. |
 | `watcher` | subagent | = verifier | Read-only supervisor for the running implementer. Answers `ask_supervisor` with ≤2 sentences of direction, and powers the passive advisories. Never edits. |
 
+The four subagents are `hidden: true`, so ordinary `build`/`plan` sessions do
+not see them in the subagent catalog and pick their own workflow. The
+orchestrator still dispatches them by ID, and `/pipeline` is the only entry
+point.
+
 All prompts end with the same terse voice contract.
 
 ## Features

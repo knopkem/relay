@@ -47,6 +47,9 @@ the relevant one before changing behavior.
   function (`Supervisor.__test`); do not add unrelated exports.
 - `ask_supervisor` is gated to `context.agent === "implementer"`; keep it that
   way.
+- `planner`, `implementer`, `verifier` and `watcher` are `hidden: true` so
+  ordinary `build`/`plan` sessions never see them in the subagent catalog. The
+  orchestrator still dispatches them by ID; keep the orchestrator visible.
 - Plain ESM `.js`, no build step. `@opencode/plugin` is the required runtime
   dependency for V2 definitions; do not add other dependencies without need.
 - Preserve the agents' terse voice contract when editing prompts.

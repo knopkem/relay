@@ -4,6 +4,7 @@ description: >-
   question with at most two sentences of direction; never writes code, never
   changes the plan. Invoked by the supervise plugin.
 mode: subagent
+hidden: true
 model: __WATCHER_MODEL__
 # __WATCHER_OPTIONS__
 temperature: 0.1
