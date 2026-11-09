@@ -6,6 +6,6 @@
     "test": "node --test plugins/tests/*.test.js"
   },
   "dependencies": {
-    "@opencode/plugin": "^2.1.4"
+    "@opencode/plugin": "^2.2.5"
   }
 }
